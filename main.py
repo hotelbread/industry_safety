@@ -4,7 +4,7 @@ from pathlib import Path
 from datetime import datetime
 import traceback
 
-from PySide6.QtWidgets import QMainWindow, QVBoxLayout, QHBoxLayout, QWidget, QLabel
+from PySide6.QtWidgets import QMainWindow, QVBoxLayout, QHBoxLayout, QWidget, QLabel, QApplication
 from PySide6.QtCore import Qt, QMutex, Slot
 
 from src.ai_module.pose_estimater import PoseEstimator
@@ -291,5 +291,9 @@ class MW(QMainWindow):
         self.video_thread.stop()
         # event.accept()
 
-
+if __name__ == '__main__':
+    app = QApplication(sys.argv)
+    window = MW(app=app)
+    window.showFullScreen()
+    sys.exit(app.exec())
 
