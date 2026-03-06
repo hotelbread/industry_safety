@@ -10,12 +10,14 @@ import traceback
 from PySide6.QtWidgets import QMainWindow, QVBoxLayout, QHBoxLayout, QWidget, QLabel, QApplication
 from PySide6.QtCore import Qt, QMutex, Slot
 
-from src.ai_module.pose_estimater import PoseEstimator
-from src.ai_module.person_detector import PersonDetector
-from src.ai_module.action_recognizer import ActionRecognizer
+# from src.ai_module.pose_estimater import PoseEstimator
+# from src.ai_module.person_detector import PersonDetector
+# from src.ai_module.action_recognizer import ActionRecognizer
 
 from src.gui_module.canvas import Canvas
-from src.module.video_thread import VideoThread
+from src.module.ai_thread import AiThread
+from src.module.vid_thread import VidThread
+# from src.module.video_thread import VideoThread
 # from src.module.inf_thread import InferenceThread
 import src.misc.tools as tools
 
@@ -106,35 +108,39 @@ class MW(QMainWindow):
 
         self.CONTROLLER_CONTAINER_WIDGET = self.WIDGET_CENTRAL_WIDTH  - (self.SPACING*2)
         self.CONTROLLER_CONTAINER_HEIGHT = self.WIDGET_CENTRAL_HEIGHT*(20/100) - (self.SPACING)
+        
+        ##################### 태원 추가#######################
+        self.video_path = os.path.join(self.RESOURCE_DIR, 'res/Vid/visol.mp4')
+        self.current_view_mode = 'video'  # 'video' or 'webcam'
+        self.roi = np.array([[100, 100], [500, 100], [500, 500], [100, 500]])  # 예시 ROI 좌표 (x1, y1, x2, y2, x3, y3, x4, y4)
+        # self.ids_in_roi = []
+        self.roi_enter_time = {}
+        self.id_last_seen = {}
+        self.active_user_id = None
+        self.roi_threshold_sec = 3 # 체류 기준
+        self.lost_threshold_sec = 5 # n초 동안 active_user가 없으면 탈주
+        self.new_user_threshold_sec = 2 # 새로 들어온 사람은 n초 이상 서있으면 인정
+        self.countdown_start = None
+        self.countdown_duration = 3  # seconds
+        ######################################################
         # -----------------------------------------------------------------
-
         self.init_res()
         # self.init_ai_model()
         self.init_ui()
         self.setup_thread()
         # -----------------------------------------------------------------
-        # 태원 추가
-        self.current_view_mode = 'video'  # 'video' or 'webcam'
-        self.roi = np.array([[100, 100], [500, 100], [500, 500], [100, 500]])  # 예시 ROI 좌표 (x1, y1, x2, y2, x3, y3, x4, y4)
-        self.id_enter_time = {} 
-        self.id_last_seen = {}
-        self.active_user_id = None
-        self.roi_threshold_sec = 3 # 체류 기준
-        self.new_user_threshold_sec = 2 # 사라짐 기준
-        self.countdown_start = None
-        self.countdown_duration = 3  # seconds
 
     def init_res(self):
         self.pixmap_logo = tools.get_resized_pixmap_based_h(self.PATH_LOGO, self.LABEL_LOGO_HEIGHT)
         self.pixmap_btn_exit = tools.get_resized_pixmap_based_h(self.PATH_BTN_EXIT, self.BTN_EXIT_HEIGHT)
 
-    def init_ai_model(self):
-        """set up the AI model"""
-        # self.device_name =  cpu'        # for cpu
-        self.device_name = 'cuda:0'     # for GPU Desktop
-        self.person_detector = PersonDetector(self.device_name, self.RESOURCE_DIR)
-        self.pose_estimator = PoseEstimator(self.device_name, self.RESOURCE_DIR)
-        self.action_recognizer = ActionRecognizer(self.device_name, self.RESOURCE_DIR)
+    # def init_ai_model(self):
+    #     """set up the AI model"""
+    #     # self.device_name =  cpu'        # for cpu
+    #     self.device_name = 'cuda:0'     # for GPU Desktop
+    #     self.person_detector = PersonDetector(self.device_name, self.RESOURCE_DIR)
+    #     self.pose_estimator = PoseEstimator(self.device_name, self.RESOURCE_DIR)
+    #     self.action_recognizer = ActionRecognizer(self.device_name, self.RESOURCE_DIR)
 
     def init_ui(self):
         ########################################
@@ -250,7 +256,9 @@ class MW(QMainWindow):
     #################################
     def label_btn_exit_mouseReleaseEvent(self, event):
         self.video_thread.stop()
-        self.inf_thread.stop()
+        self.video_thread.wait()
+        event.accept()
+        # self.inf_thread.stop()
         sys.exit(0)
 
 
@@ -285,24 +293,28 @@ class MW(QMainWindow):
 
     def setup_thread(self):
         
-        mode = 'webcam'
-        self.video_thread = VideoThread(mode,
-                                        parent=self)
-        
-        self.inf_thread = InferenceThread(self.video_thread,
-                                          self.person_detector,
-                                          self.pose_estimator,
-                                          self.action_recognizer,
-                                          parent=self)
-        self.inf_thread.signalSetImage.connect(self.canvas.update_frame)
+        # mode = 'webcam'
+        # self.video_thread = VideoThread(mode,
+        #                                 parent=self)
+        self.video_thread = VidThread(self.video_path, parent=self)
+        self.video_thread.signalSetImage.connect(self.canvas.update_frame)
+        self.ai_thread = AiThread(self.RESOURCE_DIR, parent=self)
+        # self.ai_thread = AiThread(self.webcam_thread, parent=self)
+        # self.inf_thread = InferenceThread(self.video_thread,
+        #                                   self.person_detector,
+        #                                   self.pose_estimator,
+        #                                   self.action_recognizer,
+        #                                   parent=self)
+        # self.inf_thread.signalSetImage.connect(self.canvas.update_frame)
         
         self.video_thread.start()
-        self.inf_thread.start()
+        # self.inf_thread.start()
 
-    def thread_close(self):
-        self.inf_thread.stop()
-        self.video_thread.stop()
-        # event.accept()
+    # def thread_close(self):
+    #     # self.inf_thread.stop()
+    #     self.video_thread.stop()
+    #     self.video_thread.wait()
+    #     event.accept()
         
     ############################################
     #              controller                  #
@@ -314,9 +326,9 @@ class MW(QMainWindow):
         cx = (x1 + x2) / 2
         cy = y2
         
-        result = cv2.pointPolygonTest(self.roi, (cx, cy), False)
+        result_dict = cv2.pointPolygonTest(self.roi, (cx, cy), False)
         
-        return result >= 0
+        return result_dict >= 0
     
     # 오래된 id 제거
     def cleanup_old_ids(self, now):
@@ -374,19 +386,19 @@ class MW(QMainWindow):
          
                     
         elif self.current_view_mode == 'webcam':
-            if self.active_user_id is not None: # active_user_id이 존재한다면
-                
-                if self.active_user_id not in ids_in_roi: # active_user_id이 roi 안에 있는지 확인 (없는경우, 탈주)
-                    check_time = now - self.id_last_seen[self.active_user_id] # 탈주
-                    if check_time >= self.lost_threshold_sec:
-                        if ids_in_roi: # 다른 사람이 roi에 들어온 경우, active_user_id 초기화
-                            new_active_id = max(ids_in_roi, key=lambda x: x['area'])['id']
-                            stay = now - self.roi_enter_time.get(new_active_id, now)
-                            if stay >= self.new_user_threshold_sec:
-                                self.active_user_id = new_active_id # active_user_id 변경
-                                # self.current_view_mode = 'webcam'
-                                print('Active user left, but another person is in the ROI. Switching to new active user!')
-                                break
+            # if self.active_user_id is not None: # active_user_id이 존재한다면
+            ids_in_roi_ids = [x['id'] for x in ids_in_roi]    
+            if self.active_user_id not in ids_in_roi_ids: # active_user_id이 roi 안에 있는지 확인 (없는경우, 탈주)
+                check_time = now - self.id_last_seen[self.active_user_id] # 탈주
+                if check_time >= self.lost_threshold_sec:
+                    if ids_in_roi_ids: # 다른 사람이 roi에 들어온 경우, active_user_id 초기화
+                        new_active_id = max(ids_in_roi_ids, key=lambda x: x['area'])['id']
+                        stay = now - self.roi_enter_time.get(new_active_id, now)
+                        if stay >= self.new_user_threshold_sec:
+                            self.active_user_id = new_active_id # active_user_id 변경
+                            # self.current_view_mode = 'webcam'
+                            print('Active user left, but another person is in the ROI. Switching to new active user!')
+                    else:       
                         # roi내 사람이 안들어왔네    
                         print('Switch to video mode!')
                         self.current_view_mode = 'video'
@@ -394,17 +406,17 @@ class MW(QMainWindow):
                         self.id_last_seen.pop(self.active_user_id, None)
                         self.active_user_id = None
                         # 추후에 countdown 기능 추가 예정
-                else: # active_user_id이 roi 안에 있다면
-                    self.id_last_seen[self.active_user_id] = now # active_user_id가 roi에 있으므로 last_seen 업데이트
-            else: # active_user_id이 존재하지 않는다면 (탈주상황)
-                print('[Debug] No active user found. Checking for new users in ROI...')
-                if ids_in_roi: # 다른 사람이 roi에 들어온 경우, active_user_id 초기화
-                    new_active_id = max(ids_in_roi, key=lambda x: x['area'])['id']
-                    stay = now - self.roi_enter_time.get(new_active_id, now)
-                    if stay >= self.new_user_threshold_sec:
-                        self.active_user_id = new_active_id # active_user_id 변경
-                        print('No active user, but another person is in the ROI. Switching to new active user!')
-                pass
+            else: # active_user_id이 roi 안에 있다면
+                self.id_last_seen[self.active_user_id] = now # active_user_id가 roi에 있으므로 last_seen 업데이트
+            # else: # active_user_id이 존재하지 않는다면 (탈주상황)
+            #     print('[Debug] No active user found. Checking for new users in ROI...')
+            #     if ids_in_roi: # 다른 사람이 roi에 들어온 경우, active_user_id 초기화
+            #         new_active_id = max(ids_in_roi, key=lambda x: x['area'])['id']
+            #         stay = now - self.roi_enter_time.get(new_active_id, now)
+            #         if stay >= self.new_user_threshold_sec:
+            #             self.active_user_id = new_active_id # active_user_id 변경
+            #             print('No active user, but another person is in the ROI. Switching to new active user!')
+            #     pass
      
 
 
@@ -412,14 +424,20 @@ class MW(QMainWindow):
     @Slot(dict)
     def update_controller(self, result_dict):
         
-        frame = result["frame"]
-        detections = result["detections"]
-        human_exists = result["human_exists"]
+        frame = result_dict["frame"]
+        detections = result_dict["detections"]
+        human_exists = result_dict["human_exists"]
         self.handle_roi(detections)
         
+        self.cleanup_old_ids(time.time())
         if len(self.id_last_seen) > 50:
             print(f"[ROI] tracking ids : {len(self.id_last_seen)}")
-
+        
+        if self.current_view_mode == 'video':
+            self.canvas.update_frame(frame, detections, self.roi, self.active_user_id)
+            
+        elif self.current_view_mode == 'webcam':
+            self.canvas.update_frame(frame, detections, self.roi, self.active_user_id, webcam_mode=True)
             
 
 if __name__ == '__main__':
