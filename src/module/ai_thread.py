@@ -62,6 +62,14 @@ class AiThread(QThread):
         # self.person_detector = person_detector
         # self.pose_estimator = pose_estimator
         # self.action_recognizer = action_recognizer
+        
+        # 카메라(webcam)
+        self.cap = cv2.VideoCapture(0)
+        self.frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        self.frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        self.frame_rate = self.cap.get(cv2.CAP_PROP_FPS)
+        self.parent.log(f'[Thread][AI] Camera (webcam) : {self.frame_width}x{self.frame_height} @ {self.frame_rate:.2f} FPS')
+        self.frame_loader = self.cap
 
         self._running = True
         self.prevTime = 0
@@ -139,12 +147,22 @@ class AiThread(QThread):
 
     def run(self):
         pose_results = dict()
-        while self._running:
+        # while self._running:
+        while self.cap.isOpened() and self._running:
             try:
-                frame = self.frame_loader.get_frame()
-                if frame is None:
-                    # print('skip !!!!!!!!')
+                # cam에서 이미지 가져오기
+                ret, frame = self.frame_loader.read()
+                if not ret:
+                    print('Failed to capture frame from camera.')
+                    self.cap.release()
+                    print('Camera released.')
+                    # time.sleep(1)  # 잠시 대기 후 재시도
+                    self.cap = cv2.VideoCapture(0)
                     continue
+                # frame = self.frame_loader.get_frame()
+                # if frame is None:
+                #     # print('skip !!!!!!!!')
+                #     continue
                 print()
                 print('=================================================')
                 rgb_img = frame[:, :, ::-1]
