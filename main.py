@@ -9,6 +9,8 @@ import traceback
 
 from PySide6.QtWidgets import QMainWindow, QVBoxLayout, QHBoxLayout, QWidget, QLabel, QApplication
 from PySide6.QtCore import Qt, QMutex, Slot
+from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput #동영상용
+from PySide6.QtMultimediaWidgets import QVideoWidget        #동영상용
 
 # from src.ai_module.pose_estimater import PoseEstimator
 # from src.ai_module.person_detector import PersonDetector
@@ -122,6 +124,14 @@ class MW(QMainWindow):
         self.new_user_threshold_sec = 2 # 새로 들어온 사람은 n초 이상 서있으면 인정
         self.countdown_start = None
         self.countdown_duration = 3  # seconds
+        
+        # 동영상 플레이용
+        self.media_player = QMediaPlayer()
+        self.audio_output = QAudioOutput()
+        self.video_widget = QVideoWidget()
+        self.media_player.setAudioOutput(self.audio_output)
+        self.media_player.setVideoOutput(self.video_widget)
+        self.media_player.mediaStatusChanged.connect(self.loop_video)
         ######################################################
         # -----------------------------------------------------------------
         self.init_res()
@@ -184,7 +194,8 @@ class MW(QMainWindow):
         self.label_btn_exit.setAlignment(Qt.AlignCenter)
         self.label_btn_exit.setPixmap(self.pixmap_btn_exit)
         self.label_btn_exit.mouseReleaseEvent = self.label_btn_exit_mouseReleaseEvent
-
+        
+        """
         # Sub top widget h layout
         self.h_layout_sub_top = QHBoxLayout()
         self.h_layout_sub_top.setContentsMargins(0, 0, 0, 0)
@@ -236,7 +247,45 @@ class MW(QMainWindow):
         self.h_layout_main.addWidget(self.widget_central)
         self.h_layout_main.setSpacing(0)
         self.h_layout_main.addWidget(self.widget_sub)
+        """
+        # Central widget
+        self.widget_central = QWidget()
+        self.widget_central.setContentsMargins(self.SPACING, self.SPACING, self.SPACING, self.SPACING)
+        self.widget_central.setFixedSize(self.WIDGET_CENTRAL_WIDTH, self.WIDGET_CENTRAL_HEIGHT)
+        self.widget_central.setLayout(self.v_layout_central)
+        self.widget_central.setStyleSheet("border: 2px solid #ffffff")
 
+        # Sub widget
+        self.widget_sub = QWidget()
+        self.widget_sub.setContentsMargins(self.SPACING, self.SPACING, self.SPACING, self.SPACING)
+        self.widget_sub.setFixedSize(self.WIDGET_SUB_WIDTH, self.WIDGET_SUB_HEIGHT)
+        self.widget_sub.setLayout(self.v_layout_sub)
+        self.widget_sub.setStyleSheet("border: 2px solid #ffffff")
+        
+        # 메인화면 레이아웃 (4, 보조설명widget_sub, 메인화면widget_central)
+        self.h_layout_main = QHBoxLayout()
+        self.h_layout_main.setContentsMargins(0, 0, 0, 0)
+        self.h_layout_main.setAlignment(Qt.AlignCenter)
+        self.h_layout_main.addWidget(self.widget_sub)
+        self.h_layout_main.setSpacing(0)
+        self.h_layout_main.addWidget(self.widget_central)
+        
+        # 화면 + 버튼(3, 시작, 체험안내, 동작시연, 동작수행, 평가)
+        self.v_layout_main = QVBoxLayout()
+        self.v_layout_main.setContentsMargins(0, 0, 0, 0)
+        self.v_layout_main.setLayout(self.h_layout_main)
+        
+        # Main horizontal layout (2, 화면 + 점수)
+        self.h_layout_board = QHBoxLayout()
+        self.h_layout_board.setContentsMargins(0, 0, 0, 0)
+        self.h_layout_board.setLayout(self.v_layout_main)
+                
+        # first Main Vertical layout (1)
+        self.v_layout_main = QVBoxLayout()
+        self.v_layout_main.setContentsMargins(0, 0, 0, 0)
+        self.v_layout_main.setLayout(self.h_layout_board)
+        self.widget_main.setStyleSheet("background-color: #041929;")
+        
         # Main widget
         self.widget_main = QWidget()
         self.widget_main.setContentsMargins(0, 0, 0, 0)
@@ -248,7 +297,11 @@ class MW(QMainWindow):
         self.setCentralWidget(self.widget_main)
         self.setStyleSheet("background-color: #2C303C;")
 
-
+    def loop_video(self, status):
+        
+        if status == QMediaPlayer.EndOfMedia:
+            self.media_player.setPosition(0)
+            self.media_player.play()
 
 
     #################################
@@ -296,8 +349,8 @@ class MW(QMainWindow):
         # mode = 'webcam'
         # self.video_thread = VideoThread(mode,
         #                                 parent=self)
-        self.video_thread = VidThread(self.video_path, parent=self)
-        self.video_thread.signalSetImage.connect(self.canvas.update_frame)
+        # self.video_thread = VidThread(self.video_path, parent=self)
+        # self.video_thread.signalSetImage.connect(self.canvas.update_frame)
         self.ai_thread = AiThread(self.RESOURCE_DIR, parent=self)
         # self.ai_thread = AiThread(self.webcam_thread, parent=self)
         # self.inf_thread = InferenceThread(self.video_thread,
@@ -307,7 +360,8 @@ class MW(QMainWindow):
         #                                   parent=self)
         # self.inf_thread.signalSetImage.connect(self.canvas.update_frame)
         
-        self.video_thread.start()
+        # self.video_thread.start()
+        self.ai_thread.start()
         # self.inf_thread.start()
 
     # def thread_close(self):
