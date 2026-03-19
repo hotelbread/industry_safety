@@ -1,14 +1,19 @@
 import os
 import sys
 import cv2
+import csv
 import time
 import numpy as np
 from pathlib import Path
 from datetime import datetime
 import traceback
 
-from PySide6.QtWidgets import QMainWindow, QVBoxLayout, QHBoxLayout, QWidget, QLabel, QApplication
-from PySide6.QtCore import Qt, QMutex, Slot
+from gtts import gTTS
+from src.module.audio_manager import AudioManager
+from src.module.evaluation_module import ExperienceEvaluator
+
+from PySide6.QtWidgets import QMainWindow, QVBoxLayout, QHBoxLayout, QWidget, QLabel, QApplication, QStackedWidget, QPushButton, QTableWidget, QTableWidgetItem, QHeaderView 
+from PySide6.QtCore import Qt, QMutex, Slot, QUrl, QTimer, Signal
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput #동영상용
 from PySide6.QtMultimediaWidgets import QVideoWidget        #동영상용
 
@@ -22,6 +27,11 @@ from src.module.vid_thread import VidThread
 # from src.module.video_thread import VideoThread
 # from src.module.inf_thread import InferenceThread
 import src.misc.tools as tools
+# import numpy as np
+# from PyQt5.QtWidgets import QTableWidgetItem
+# from PyQt5 import QtCore
+# from PyQt5.QtGui import QColor
+# from django.utils.timezone import now
 
 def get_resource_dir():
     if getattr(sys, 'frozen', False):
@@ -29,6 +39,7 @@ def get_resource_dir():
     return Path(__file__).resolve().parent
 
 class MW(QMainWindow):
+    signalviewinfo = Signal(dict)
     def __init__(self, app):
         """ Constructor for Empty Window Class """
         super().__init__()
@@ -66,6 +77,13 @@ class MW(QMainWindow):
         self.COLOR_DEEP_GRAY = '#383838'
         self.COLOR_GRAY = '#303030'
         self.COLOR_LIGHT_GRAY = '#3D3D3D'
+        
+        self.COLOR_BRIGHT_GRAY = '#CECECE'
+        self.COLOR_NEW_BG   = '#1A6B4A'   # 새 행 배경
+        self.COLOR_NEW_TEXT = '#A8FFDA'   # 새 행 텍스트
+        self.COLOR_ODD_BG   = '#3D3D3D'   # 기존 홀수 행 배경 (기존 AlternatingRowColors 대체)
+        self.COLOR_EVEN_BG  = '#2C2C2C'   # 기존 짝수 행 배경
+        
         self.COLOR_RED = '#E6544E'
         self.COLOR_DEEP_RED = '#870601'
         self.COLOR_GREEN = '#17A079'
@@ -112,9 +130,11 @@ class MW(QMainWindow):
         self.CONTROLLER_CONTAINER_HEIGHT = self.WIDGET_CENTRAL_HEIGHT*(20/100) - (self.SPACING)
         
         ##################### 태원 추가#######################
+        self.admin_mode = False
         self.video_path = os.path.join(self.RESOURCE_DIR, 'res/Vid/visol.mp4')
-        self.current_view_mode = 'video'  # 'video' or 'webcam'
-        self.roi = np.array([[100, 100], [500, 100], [500, 500], [100, 500]])  # 예시 ROI 좌표 (x1, y1, x2, y2, x3, y3, x4, y4)
+        self.current_view_mode = 'webcam'  # 'video' or 'webcam'
+        self.roi = [(1200, 450), (1200, 850), (800, 450), (850, 800)]  # 예시 ROI 좌표 (x1, y1, x2, y2, x3, y3, x4, y4) roi = [(x_video, y_video)]
+        # self.roi = np.array([[1200, 450], [1200, 850], [800, 450], [850, 800]])  # 예시 ROI 좌표 (x1, y1, x2, y2, x3, y3, x4, y4)
         # self.ids_in_roi = []
         self.roi_enter_time = {}
         self.id_last_seen = {}
@@ -122,16 +142,19 @@ class MW(QMainWindow):
         self.roi_threshold_sec = 3 # 체류 기준
         self.lost_threshold_sec = 5 # n초 동안 active_user가 없으면 탈주
         self.new_user_threshold_sec = 2 # 새로 들어온 사람은 n초 이상 서있으면 인정
-        self.countdown_start = None
+        self.countdown = None
         self.countdown_duration = 3  # seconds
-        
-        # 동영상 플레이용
-        self.media_player = QMediaPlayer()
-        self.audio_output = QAudioOutput()
-        self.video_widget = QVideoWidget()
-        self.media_player.setAudioOutput(self.audio_output)
-        self.media_player.setVideoOutput(self.video_widget)
-        self.media_player.mediaStatusChanged.connect(self.loop_video)
+        self.rank = 1
+        self.human_time = 0 # roi내에 서있던시간
+        self.experience_start_check = 0
+        self.action_recogniton = False
+        self.countdown_off = False
+        self.STAGE_NAMES = ["붐 올리기", "권상", "비상 정지"]
+        self._eval_stage = -1 # 0, 1, 2 / -1은 수집X 
+
+        self.exp_evaluator = ExperienceEvaluator(self.STAGE_NAMES)
+        self.audio = AudioManager()
+           
         ######################################################
         # -----------------------------------------------------------------
         self.init_res()
@@ -156,6 +179,7 @@ class MW(QMainWindow):
         ########################################
         #               init GUI               #
         ########################################
+        """
         self.canvas = Canvas()
         self.canvas.setContentsMargins(0, 0, 0, 0)
         self.canvas.setFixedSize(self.CANVAS_WIDTH, self.CANVAS_HEIGHT)
@@ -195,7 +219,6 @@ class MW(QMainWindow):
         self.label_btn_exit.setPixmap(self.pixmap_btn_exit)
         self.label_btn_exit.mouseReleaseEvent = self.label_btn_exit_mouseReleaseEvent
         
-        """
         # Sub top widget h layout
         self.h_layout_sub_top = QHBoxLayout()
         self.h_layout_sub_top.setContentsMargins(0, 0, 0, 0)
@@ -248,73 +271,499 @@ class MW(QMainWindow):
         self.h_layout_main.setSpacing(0)
         self.h_layout_main.addWidget(self.widget_sub)
         """
-        # Central widget
-        self.widget_central = QWidget()
-        self.widget_central.setContentsMargins(self.SPACING, self.SPACING, self.SPACING, self.SPACING)
-        self.widget_central.setFixedSize(self.WIDGET_CENTRAL_WIDTH, self.WIDGET_CENTRAL_HEIGHT)
-        self.widget_central.setLayout(self.v_layout_central)
-        self.widget_central.setStyleSheet("border: 2px solid #ffffff")
+        # Canvas 
+        self.canvas = Canvas()
+        self.canvas.setContentsMargins(0, 0, 0, 0)
+        # self.canvas.setFixedSize(self.CANVAS_WIDTH, self.CANVAS_HEIGHT)
+        
+        # self.layout_cam = QHBoxLayout()
+        # self.layout_cam.setContentsMargins(0, 0, 0, 0)
+        
+        # self.layout_cam.addWidget(self.widget_sub, 2)
+        # self.layout_cam.addWidget(self.canvas, 5)
 
+        # # Central widget
+        # self.widget_central = QWidget()
+        # self.widget_central.setContentsMargins(self.SPACING, self.SPACING, self.SPACING, self.SPACING)
+        # # self.widget_central.setFixedSize(self.WIDGET_CENTRAL_WIDTH, self.WIDGET_CENTRAL_HEIGHT)
+        # self.widget_central.setStyleSheet("border: 2px solid #ffffff")
+        
+        # 메인 화면쪽
+        # self.stack = QStackedWidget()
+        
+        # layout_central = QVBoxLayout()
+        # layout_central.setContentsMargins(0, 0, 0, 0)
+        # layout_central.addWidget(self.stack)
+        
+        # self.widget_central.setLayout(layout_central)
+        
+        # self.page_video = QWidget()
+        
+        
+        # self.video_widget = QVideoWidget()
+        # self.layout_video = QVBoxLayout()
+        # self.layout_video.addWidget(self.video_widget)
+        
+        # self.page_video.setLayout(self.layout_video)
+        
+        # self.media_player = QMediaPlayer()
+        
+        # self.audio_output = QAudioOutput()
+        # self.media_player.setAudioOutput(self.audio_output)
+        
+        # self.media_player.setVideoOutput(self.video_widget)
+        # self.media_player.setSource(QUrl.fromLocalFile(self.video_path))
+        
+        # self.media_player.play()
+        # self.media_player.mediaStatusChanged.connect(self.loop_video)
+        
+        
+        # 웹캠 버전!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+        self.page_webcam = QWidget() 
+        
+        self.layout_cam = QHBoxLayout()
+        self.layout_cam.setContentsMargins(0, 0, 0, 0)
+        
+        # stack에 추가!!!(sub)
+        # self.stack.addWidget(self.page_webcam)
+        
         # Sub widget
-        self.widget_sub = QWidget()
-        self.widget_sub.setContentsMargins(self.SPACING, self.SPACING, self.SPACING, self.SPACING)
-        self.widget_sub.setFixedSize(self.WIDGET_SUB_WIDTH, self.WIDGET_SUB_HEIGHT)
-        self.widget_sub.setLayout(self.v_layout_sub)
+        self.widget_sub = QStackedWidget()
+        # self.widget_sub.setContentsMargins(self.SPACING, self.SPACING, self.SPACING, self.SPACING)
         self.widget_sub.setStyleSheet("border: 2px solid #ffffff")
         
-        # 메인화면 레이아웃 (4, 보조설명widget_sub, 메인화면widget_central)
+        # Sub widget 내 단계별 레이아웃 추가 (stack활용)
+        self.widget_sub4_0 = QWidget() # 처음 빈 화면
+        self.widget_sub4_1 = QWidget() # 시작예고
+        self.widget_sub4_2 = QWidget() # 체험중
+        self.widget_sub4_3 = QWidget() # 평가화면
+        
+        self.anounce_box_1 = QLabel()
+        self.anounce_box_1.setStyleSheet("color: white; font-size: 20px; font-weight: bold;")
+        self.anounce_box_1.setFixedHeight(100)
+                
+        self.anounce_box_2 = QLabel()
+        self.anounce_box_2.setStyleSheet("color: white; font-size: 20px; font-weight: bold;")
+        self.anounce_box_2.setFixedHeight(100)
+        
+        self.anounce_box_3 = QLabel()
+        self.anounce_box_3.setStyleSheet("color: white; font-size: 20px; font-weight: bold;")
+        self.anounce_box_3.setFixedHeight(100)
+        
+        self.explain_box_2 = QLabel(f"1 단계. '붐 올리기' 동작을 취해보세요")
+        self.explain_box_2.setStyleSheet(f"background-color : {self.COLOR_BRIGHT_GRAY};color: white; font-size: 20px; font-weight: bold;")
+        self.explain_box_2.setFixedHeight(100)
+        
+        self.explain_box_3 = QLabel(f"1 단계. '붐 올리기' 동작을 취해보세요")
+        self.explain_box_3.setStyleSheet(f"background-color : {self.COLOR_BRIGHT_GRAY};color: white; font-size: 20px; font-weight: bold;")
+        self.explain_box_3.setFixedHeight(100)
+      
+        self.widget_scoreboard = QLabel("수신호 동작 평가")
+        self.widget_scoreboard.setAlignment(Qt.AlignCenter)
+        self.widget_scoreboard.setStyleSheet(f"background-color: {self.COLOR_BRIGHT_GRAY}; color: black; font-size: 20px; font-weight: bold;")
+        self.widget_scoreboard.setFixedHeight(40)
+        self.widget_scoreboard.setContentsMargins(0, 200, 0, 200)
+        
+        self.widget_scoretable = QTableWidget()
+              
+        self.widget_scoretable.setRowCount(5)
+        self.widget_scoretable.setColumnCount(5)
+        
+        self.widget_scoretable.setHorizontalHeaderLabels(['No.', '동작', '정확도', '안정성', '평균'])
+        self.widget_scoretable.horizontalHeader().setFixedHeight(60)
+        self.widget_scoretable.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.widget_scoretable.verticalHeader().setDefaultSectionSize(60)
+        self.widget_scoretable.verticalHeader().setVisible(False)
+        self.widget_scoretable.setSortingEnabled(True) # 등수에 따라 자동 정렬해주는거 추가해야함. 아직 안함
+        self.widget_scoretable.setAlternatingRowColors(False)
+        # self.widget_scoretable.setAlternatingRowColors(True) # 행마다 색깔 다르게 (가독성 위해)
+        
+        self.widget_scoretable.setStyleSheet("""QTableWidget {
+                                    background-color: white;
+                                    gridline-color: gray;
+                                    font-size: 14px;
+                                }
+
+                                QHeaderView::section {
+                                    background-color: #888;
+                                    color: white;
+                                }
+                                """)
+        
+        
+      
+        self.widget_scoretext = QLabel(f"축하합니다! 성공하셨습니다.\n 현재 {self.rank}입니다.")
+        self.widget_scoretext.setStyleSheet("color: white; font-size: 20px; font-weight: bold;")
+        
+        
+        self.layout_sub4_1 = QVBoxLayout()
+        self.layout_sub4_1.addWidget(self.anounce_box_1)
+        self.layout_sub4_1.addStretch()
+        
+        self.layout_sub4_2 = QVBoxLayout()
+        self.layout_sub4_2.addWidget(self.anounce_box_2)
+        self.layout_sub4_2.addWidget(self.explain_box_2)
+        self.layout_sub4_2.addStretch()
+
+        
+        self.layout_sub4_3 = QVBoxLayout()
+        self.layout_sub4_3.addWidget(self.anounce_box_3)
+        self.layout_sub4_3.addWidget(self.explain_box_3)
+        self.layout_sub4_3.addWidget(self.widget_scoreboard)
+        self.layout_sub4_3.addWidget(self.widget_scoretable)
+        self.layout_sub4_3.addWidget(self.widget_scoretext)
+        
+        self.widget_sub4_1.setLayout(self.layout_sub4_1)
+        self.widget_sub4_2.setLayout(self.layout_sub4_2)
+        self.widget_sub4_3.setLayout(self.layout_sub4_3)
+        
+        self.widget_sub.addWidget(self.widget_sub4_0)
+        self.widget_sub.addWidget(self.widget_sub4_1)
+        self.widget_sub.addWidget(self.widget_sub4_2)
+        self.widget_sub.addWidget(self.widget_sub4_3)
+        
+                
+        self.layout_cam.addWidget(self.widget_sub, 2)
+        self.layout_cam.addWidget(self.canvas, 5)
+        
+        self.page_webcam.setLayout(self.layout_cam)
+        
+        # stack에 추가!!!(메인)
+        # self.stack.addWidget(self.page_video)
+        # self.stack.addWidget(self.page_webcam)
+        
+        
+        # 메인화면 레이아웃 (4, 4-1보조설명widget_sub, 4-2메인화면widget_central)
         self.h_layout_main = QHBoxLayout()
         self.h_layout_main.setContentsMargins(0, 0, 0, 0)
-        self.h_layout_main.setAlignment(Qt.AlignCenter)
-        self.h_layout_main.addWidget(self.widget_sub)
-        self.h_layout_main.setSpacing(0)
-        self.h_layout_main.addWidget(self.widget_central)
+        self.h_layout_main.addWidget(self.page_webcam)
+        # self.h_layout_main.addWidget(self.stack)
+        # self.h_layout_main.setContentsMargins(0, 0, 0, 0)
+        # self.h_layout_main.setAlignment(Qt.AlignCenter)
+        # self.h_layout_main.addWidget(self.widget_sub, 2)
+        # self.h_layout_main.setSpacing(0)
+        # self.h_layout_main.addWidget(self.widget_central, 5)
+        # self.page_webcam.setLayout(self.h_layout_main)
+        # page_webcam에 담기
         
-        # 화면 + 버튼(3, 시작, 체험안내, 동작시연, 동작수행, 평가)
-        self.v_layout_main = QVBoxLayout()
-        self.v_layout_main.setContentsMargins(0, 0, 0, 0)
-        self.v_layout_main.setLayout(self.h_layout_main)
+        # 화면 + 버튼(3, 3-2 버튼(시작, 체험안내, 동작시연, 동작수행, 평가))
+        self.v_layout_second = QVBoxLayout()
+        self.v_layout_second.setContentsMargins(0, 0, 0, 0)
+        self.v_layout_second.addLayout(self.h_layout_main)
         
-        # Main horizontal layout (2, 화면 + 점수)
+        # 전환버튼
+        self.btn_layout = QHBoxLayout()
+        self.btn_layout.setContentsMargins(0, 0, 0, 0)
+  
+        self.btn_start = QPushButton("시작")
+        self.btn_start.setStyleSheet('font-size:20px; color:white')
+        self.btn_guide = QPushButton("체험안내")
+        self.btn_guide.setStyleSheet('font-size:20px; color:white')
+        self.btn_demo = QPushButton("동작시연")
+        self.btn_demo.setStyleSheet('font-size:20px; color:white')
+        self.btn_action = QPushButton("동작수행")
+        self.btn_action.setStyleSheet('font-size:20px; color:white')
+        self.btn_score = QPushButton("평가")
+        self.btn_score.setStyleSheet('font-size:20px; color:white')
+
+        self.btn_layout.addWidget(self.btn_start)
+        self.btn_layout.addWidget(self.btn_guide)
+        self.btn_layout.addWidget(self.btn_demo)
+        self.btn_layout.addWidget(self.btn_action)
+        self.btn_layout.addWidget(self.btn_score)
+        
+        # self.btn_start.clicked.connect(self.video_start)
+        self.btn_guide.clicked.connect(self.webcam_start)
+        self.btn_demo.clicked.connect(self.mode_1)
+        self.btn_action.clicked.connect(self.mode_2_1)
+        self.btn_score.clicked.connect(self.mode_3)
+        
+        self.v_layout_second.addLayout(self.btn_layout)
+        
+        ## rank board layout (2-2, 시계 + 제목 + 점수보드 + 취소버튼)
+        # label date
+        self.clock_date = QLabel()
+        self.clock_date.setText('0000. 00. 00 (Mon)')
+        self.clock_date.setStyleSheet('font-size: 30px; color: black;')
+        self.clock_date.setAlignment(Qt.AlignBottom | Qt.AlignCenter)
+
+        # label time
+        self.clock_time = QLabel()
+        self.clock_time.setText('00:00:00')
+        self.clock_time.setStyleSheet('font-size: 50px; color: black;')
+        self.clock_time.setAlignment(Qt.AlignTop | Qt.AlignCenter)
+
+        # layout date & time
+        self.layout_clock = QVBoxLayout()
+        self.layout_clock.setAlignment(Qt.AlignTop)
+        self.layout_clock.addWidget(self.clock_date,1)
+        # self.layout_clock.addStretch()
+        self.layout_clock.addWidget(self.clock_time,1)
+        # self.layout_clock.addStretch()
+        
+        self.widget_rankboard = QLabel("평가랭킹")
+        self.widget_rankboard.setAlignment(Qt.AlignCenter)
+        self.widget_rankboard.setStyleSheet(f"background-color: {self.COLOR_BRIGHT_GRAY}; color: black; font-size: 20px; font-weight: bold;")
+        self.widget_rankboard.setFixedHeight(40)
+        self.widget_rankboard.setContentsMargins(0, 100, 0, 100)
+        
+        self.widget_rank = QTableWidget()
+        
+        self.widget_rank.setRowCount(30)
+        self.widget_rank.setColumnCount(2)
+        
+        # self.widget_rank.setHorizontalHeaderLabels(['순위', '이름', '체험시간', '점수'])
+        self.widget_rank.setHorizontalHeaderLabels(['순위', '점수'])
+        self.widget_rank.horizontalHeader().setFixedHeight(60)
+        self.widget_rank.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.widget_rank.verticalHeader().setDefaultSectionSize(60)
+        self.widget_rank.verticalHeader().setVisible(False)
+        self.widget_rank.setSortingEnabled(True) # 등수에 따라 자동 정렬해주는거 추가해야함. 아직 안함
+        self.widget_rank.setAlternatingRowColors(True) # 행마다 색깔 다르게 (가독성 위해)
+        
+        self.widget_rank.setStyleSheet("""QTableWidget {
+                                    background-color: white;
+                                    gridline-color: gray;
+                                    font-size: 14px;
+                                }
+
+                                QHeaderView::section {
+                                    background-color: #888;
+                                    color: white;
+                                }
+                                """)
+        
+        # 체험초기화 버튼
+        self.btn_rank_reset = QPushButton("체험 초기화")
+        self.btn_rank_reset.setStyleSheet(f"background-color: {self.COLOR_BRIGHT_GRAY}; color: black; font-size: 20px;")
+        self.btn_rank_reset.setFixedHeight(40)
+        self.btn_rank_reset.clicked.connect(self._on_reset_btn)
+        
+        
+        self.layout_rank = QVBoxLayout()
+        self.layout_rank.setContentsMargins(10, 10, 10, 10)
+        self.layout_rank.addLayout(self.layout_clock,2)
+        self.layout_rank.addWidget(self.widget_rankboard, 1)
+        self.layout_rank.addWidget(self.widget_rank,7)
+        self.layout_rank.addWidget(self.btn_rank_reset, 1)
+        self.layout_rank_bg = QWidget()
+        self.layout_rank_bg.setLayout(self.layout_rank)
+        self.layout_rank_bg.setStyleSheet(f"background-color: {self.COLOR_LIGHT_GRAY}")
+        
+        # Main horizontal layout (2, 화면2-1 + 점수보드2-2)
         self.h_layout_board = QHBoxLayout()
         self.h_layout_board.setContentsMargins(0, 0, 0, 0)
-        self.h_layout_board.setLayout(self.v_layout_main)
+        self.h_layout_board.addLayout(self.v_layout_second,9)
+        self.h_layout_board.addWidget(self.layout_rank_bg,2)
+        
+        # head layout (Label logo + 글자 + Btn exit)
+        self.head_logo = QLabel()
+        self.head_logo.setPixmap(self.pixmap_logo)
+        
+        self.head_text = QLabel("Industrial Safety")
+        self.head_text.setStyleSheet("color: #ffffff; font-size: 40px; font-weight: bold;")
+        self.head_text.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        
+        self.head_btn_exit = QLabel()
+        self.head_btn_exit.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.head_btn_exit.setPixmap(self.pixmap_btn_exit)
+        self.head_btn_exit.mouseReleaseEvent = self.label_btn_exit_mouseReleaseEvent
+        
+        self.head_layout = QHBoxLayout()
+        self.head_layout.setContentsMargins(0, 0, 0, 0)
+        self.head_layout.addWidget(self.head_logo)
+        self.head_layout.addWidget(self.head_text)
+        self.head_layout.addStretch()
+        self.head_layout.addWidget(self.head_btn_exit)
+        # self.widget_head = QWidget()
+        # self.widget_head.setContentsMargins(0, 0, 0, 0)
+        # self.widget_head.setStyleSheet("border: 2px solid #ffffff")
                 
-        # first Main Vertical layout (1)
-        self.v_layout_main = QVBoxLayout()
-        self.v_layout_main.setContentsMargins(0, 0, 0, 0)
-        self.v_layout_main.setLayout(self.h_layout_board)
-        self.widget_main.setStyleSheet("background-color: #041929;")
+        # first Main Vertical layout (1, 1-1, 1-2)
+        self.v_layout_first = QVBoxLayout()
+        self.v_layout_first.addLayout(self.head_layout)
+        self.v_layout_first.addLayout(self.h_layout_board)
+        self.v_layout_first.setContentsMargins(0, 0, 0, 0)
+        # self.v_layout_first.setStyleSheet("border: 2px solid #ffffff")
         
         # Main widget
         self.widget_main = QWidget()
         self.widget_main.setContentsMargins(0, 0, 0, 0)
-        self.widget_main.setLayout(self.h_layout_main)
+        self.widget_main.setLayout(self.v_layout_first)
         self.widget_main.setStyleSheet("background-color: #041929;")
 
         # ----------------------------------------------------------
         # Main Window
         self.setCentralWidget(self.widget_main)
         self.setStyleSheet("background-color: #2C303C;")
+        
+        # 초기셋팅 (0번:영상, 1번:웹캠)
+        # self.stack.setCurrentIndex(1)
+        # self.stack.setCurrentIndex(1)
 
     def loop_video(self, status):
         
         if status == QMediaPlayer.EndOfMedia:
             self.media_player.setPosition(0)
             self.media_player.play()
-
+            
+    def timeout(self):
+        now = datetime.now()
+        self.clock_date.setText(f'{now.strftime("%Y. %m. %d (%a)")}')
+        self.clock_time.setText(f'{now.strftime("%H:%M:%S")}')
 
     #################################
     ###    Btn action listener    ###
     #################################
+    # def mousePressEvent(self, event):
+        
+    #     if not self.admin_mode:
+    #         return
+        
+    #     if event.button() == Qt.LeftButton:
+    #         x = event.position().x()
+    #         y = event.position().y()
+            
+    #         self.roi.append((x, y))
+            
+    #         print(f'Added point: ({x}, {y})')
+    #         # self.canvas.update()
+            
+    def video_start(self):
+        self.current_view_mode = 'video'
+        self.stack.setCurrentIndex(0)
+        print(f'[Debug][Main] Switched to video mode')
+        
+        self.active_user_id = None
+    
+    def webcam_start(self):
+        self.current_view_mode = 'webcam'
+        # self.stack.setCurrentIndex(1)
+        self.widget_sub.setCurrentWidget(self.widget_sub4_0)
+        print(f'[Debug][Main] Switched to webcam mode')
+        
+    def mode_1(self):
+        self.widget_sub.setCurrentWidget(self.widget_sub4_1)
+        ready_time = 3
+        act_time = 5
+        self.anounce_box_1.setText(f'준비되셨나요. \n 그럼 {ready_time}초 후 시작합니다! \n 각 동작은 {act_time}초간 진행하세요')        
+        print(f'[Debug][button1] mode1')
+        
+    def mode_2_1(self):
+        self.widget_sub.setCurrentWidget(self.widget_sub4_2)
+        ready_time = 3
+        act_time = 5
+        self.anounce_box_2.setText(f'준비되셨나요. \n 그럼 {ready_time}초 후 시작합니다! \n 각 동작은 {act_time}초간 진행하세요')        
+        self.explain_box_2.setText(f'1단계. \n \"붐 올리기\" 동작을 취해보세요.')
+        print(f'[Debug][button2] mode2_1')
+    
+    def mode_2_2(self):
+        self.widget_sub.setCurrentWidget(self.widget_sub4_2)
+        ready_time = 3
+        act_time = 5
+        self.anounce_box_2.setText(f'준비되셨나요. \n 그럼 {ready_time}초 후 시작합니다! \n 각 동작은 {act_time}초간 진행하세요')        
+        self.explain_box_2.setText(f'2단계. \n \"권상\" 동작을 취해보세요.')
+        print(f'[Debug][button2] mode2_2')
+        
+    def mode_2_3(self):
+        self.widget_sub.setCurrentWidget(self.widget_sub4_2)
+        ready_time = 3
+        act_time = 5
+        self.anounce_box_2.setText(f'준비되셨나요. \n 그럼 {ready_time}초 후 시작합니다! \n 각 동작은 {act_time}초간 진행하세요')        
+        self.explain_box_2.setText(f'3단계. \n \"비상 정지\" 동작을 취해보세요.')
+        print(f'[Debug][button2] mode2_3')
+        
+    def mode_3(self):
+        self.widget_sub.setCurrentWidget(self.widget_sub4_3)
+        ready_time = 3
+        act_time = 5
+        self.anounce_box_3.setText(f'준비되셨나요. \n 그럼 {ready_time}초 후 시작합니다! \n 각 동작은 {act_time}초간 진행하세요')        
+        self.explain_box_3.setText(f'3단계. \n \"붐 올리기\" 동작을 취해보세요.')
+        print(f'[Debug][button3] mode3')
+        
     def label_btn_exit_mouseReleaseEvent(self, event):
-        self.video_thread.stop()
-        self.video_thread.wait()
-        event.accept()
+        # self.video_thread.stop()
+        # self.video_thread.wait()
+        # self.ai_thread.stop()
+        # self.ai_thread.wait()
+        # event.accept()
         # self.inf_thread.stop()
         sys.exit(0)
 
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Q:
+            self.label_btn_exit_mouseReleaseEvent(event)
+        elif event.key() == Qt.Key_F:
+            if self.isFullScreen():
+                self.showNormal()
+            else:
+                self.showFullScreen()
+        elif event.key() == Qt.Key_P:
+            self.canvas.roi_points = []
+            if self.admin_mode == False:
+                self.admin_mode = True
+                self.canvas.admin_mode = True
+                print("Admin mode activated")
+        elif event.key() == Qt.Key_D:
+            print(f'roi_enter_time : {self.roi_enter_time}')
+            print(f'id_last_seen : {self.id_last_seen}')
+            print(f'active_user_id : {self.active_user_id}')
+        elif event.key() == Qt.Key_Escape:
+            if self.admin_mode == True:
+                self.admin_mode = False
+                self.canvas.admin_mode = False
+                print("Admin mode deactivated")
+        else:
+            pass
+        
+    def save_rank_csv(self):
+        now = datetime.now()
+        file_name = now.strftime('%y%m%d_%H%M%S') + '_rank_reset_log.csv'
+        with open(file_name, 'w', newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            
+            headers = ['Rank', 'Name', 'Time', 'Score']
+            writer.writerow(headers)
+            for row in range(self.widget_rank.rowCount()):
+                row_data = []
+                for column in range(self.widget_rank.columnCount()):
+                    item = self.widget_rank.item(row, column)
+                    row_data.append(item.text() if item else '')
+                writer.writerow(row_data)
+        
+    def clear_rank_table(self):        
+        self.widget_rank.clearContents()
 
+    def rank_reset(self):
+
+        self.save_rank_csv() # csv파일로 저장 기능
+        self.clear_rank_table()
+        
+    def reset_experience(self):
+        print('[Debug][Main] Reset experience mode]')
+        # Ai 감지
+        self.active_user_id = None
+        self.roi_enter_time = {}
+        self.id_last_seen = {}
+        # 체험흐름
+        self.current_view_mode = 'webcam'
+        self.countdown = None
+        self.countdown_off = False
+        self.experience_start_check = 0
+        self.human_time = 0
+        self.action_recogniton = False
+        # 평가 모듈
+        self._eval_stage = -1
+        self.exp_evaluator.reset()
+        # gui 초기화
+        self.webcam_start()
+        print('[Debug][Main] Experience mode reset 완료!!!]')
+        
+    def _on_reset_btn(self):
+        self.rank_reset()           # csv 저장 + 테이블초기화
+        self.reset_experience()     # 체험 상태 초기화
+        
+        
     ########################################
     #                main                  #
     ########################################
@@ -352,6 +801,7 @@ class MW(QMainWindow):
         # self.video_thread = VidThread(self.video_path, parent=self)
         # self.video_thread.signalSetImage.connect(self.canvas.update_frame)
         self.ai_thread = AiThread(self.RESOURCE_DIR, parent=self)
+        
         # self.ai_thread = AiThread(self.webcam_thread, parent=self)
         # self.inf_thread = InferenceThread(self.video_thread,
         #                                   self.person_detector,
@@ -359,10 +809,20 @@ class MW(QMainWindow):
         #                                   self.action_recognizer,
         #                                   parent=self)
         # self.inf_thread.signalSetImage.connect(self.canvas.update_frame)
+        self.signalviewinfo.connect(self.ai_thread.update_status) # main -> ai_thread
+        self.ai_thread.signalSetImage.connect(self.update_controller) # ai_thread -> main
         
         # self.video_thread.start()
         self.ai_thread.start()
         # self.inf_thread.start()
+        
+        # timer
+        self.timer = QTimer()
+        self.timer.setInterval(1000)
+        self.timer.timeout.connect(self.timeout)
+
+        self.timer.start()
+        
 
     # def thread_close(self):
     #     # self.inf_thread.stop()
@@ -380,6 +840,11 @@ class MW(QMainWindow):
         cx = (x1 + x2) / 2
         cy = y2
         
+        # result_dict = cv2.pointPolygonTest(self.roi, (cx, cy), False)
+        if len(self.canvas.roi_points)<3:
+            return False
+        
+        self.roi = np.array(self.canvas.roi_points, np.int32)
         result_dict = cv2.pointPolygonTest(self.roi, (cx, cy), False)
         
         return result_dict >= 0
@@ -402,97 +867,438 @@ class MW(QMainWindow):
             self.roi_enter_time.pop(human_id, None)
             self.id_last_seen.pop(human_id, None)
             
+    def countdown_fun(self, check_time, countdown_time=5):
+        self.countdown_off = False
+        if check_time > self.roi_threshold_sec:
+            if self.experience_start_check == 0:
+                self.experience_start_check = time.time()
+            duration = countdown_time + 1 - int(time.time() - self.experience_start_check)
+            font_color = {10 : 'red', 3: 'green', 5 :'blue'}
+            self.countdown = {'color' : font_color[countdown_time],
+                         'time' : duration-1}
+            if duration < 0:
+                # self.human_time = 0
+                self.experience_start_check = 0
+                self.countdown_off = True
+        else :
+            self.countdown = None
+        # self.canvas.update_frame(frame, countdown)
     # ROI 처리
     def handle_roi(self, detections):
         
         now = time.time()
         ids_in_roi = []
-                
-        for det in detections:
-            bbox = det['bbox']
-            human_id = det['id']
-            if self.is_inside_roi(bbox):
-                
-                x1, y1, x2, y2 = bbox
-                area = (x2 - x1) * (y2 - y1)
-                ids_in_roi.append({'id': human_id, 
-                                   'area': area, 
-                                   'bbox': bbox})
-            
+        
+        if len(detections) > 0:
+            for det in detections:
+                # bbox = det['bbox']
+                # human_id = det['id']
+                # print(f'[Debug][handle_roi] det: {det}]')
+                # print(f'[Debug][handle_roi] det type: {type(det)}]')
+                if len(det) != 7: # tracking이 되지 않은 경우
+                    continue
+                bbox = det[:4]
+                human_id = int(det[4])
+                if self.is_inside_roi(bbox):
+                    
+                    x1, y1, x2, y2 = bbox
+                    area = (x2 - x1) * (y2 - y1)
+                    ids_in_roi.append({'id': human_id, 
+                                    'area': area, 
+                                    'bbox': bbox})
+        # print(f'[Debug][handle_roi] detections : {detections}')
         target_id = None
         if len(ids_in_roi) > 0:
             # ROI 안에 여러 명이 있다면, 가장 큰 bbox를 가진 사람을 선택
             target_id = max(ids_in_roi, key=lambda x: x['area'])['id']
+            # print(f'[Debug][handle_roi] type: {type(target_id)}, target_id : {target_id} )')
 
             if target_id not in self.roi_enter_time: # 처음 들어온 사람이라면
                 self.roi_enter_time[target_id] = now
 
             self.id_last_seen[target_id] = now
         
-        if self.current_view_mode == 'video':
+        # if self.current_view_mode == 'video':
             if target_id is not None:
                 stay = now - self.roi_enter_time[target_id]
                 if stay >= self.roi_threshold_sec:
                     self.active_user_id = target_id
-                    self.current_view_mode = 'webcam'
-                    print('Switch to webcam mode!')
+        #             self.current_view_mode = 'webcam'
+        #             print('Switch to webcam mode!')
         
          
                     
-        elif self.current_view_mode == 'webcam':
-            # if self.active_user_id is not None: # active_user_id이 존재한다면
-            ids_in_roi_ids = [x['id'] for x in ids_in_roi]    
+        # if self.current_view_mode == 'webcam':
+        if self.active_user_id is not None: # active_user_id이 존재한다면
+            # print(f'[Debug][handle_roi] ids_in_roi {ids_in_roi}')
+            ids_in_roi_ids = [x['id'] for x in ids_in_roi]
+            # print(f'[Debug][handle_roi] ids_in_roi_ids {ids_in_roi_ids}')
             if self.active_user_id not in ids_in_roi_ids: # active_user_id이 roi 안에 있는지 확인 (없는경우, 탈주)
                 check_time = now - self.id_last_seen[self.active_user_id] # 탈주
+                print(f'[Debug][handle_roi] User {self.active_user_id} lost for {check_time} seconds!]')
                 if check_time >= self.lost_threshold_sec:
                     if ids_in_roi_ids: # 다른 사람이 roi에 들어온 경우, active_user_id 초기화
-                        new_active_id = max(ids_in_roi_ids, key=lambda x: x['area'])['id']
+                        new_active_id = max(ids_in_roi, key=lambda x: x['area'])['id']
                         stay = now - self.roi_enter_time.get(new_active_id, now)
+                        print(f'[Debug][handle_roi] 새로운사람 등장 id : {new_active_id}')
+                        print(f'[Debug][handle_roi] stay : {stay}')
                         if stay >= self.new_user_threshold_sec:
                             self.active_user_id = new_active_id # active_user_id 변경
                             # self.current_view_mode = 'webcam'
                             print('Active user left, but another person is in the ROI. Switching to new active user!')
+                            print(f'New active user ID: {self.active_user_id}')
                     else:       
                         # roi내 사람이 안들어왔네    
-                        print('Switch to video mode!')
-                        self.current_view_mode = 'video'
-                        self.roi_enter_time.pop(self.active_user_id, None)
-                        self.id_last_seen.pop(self.active_user_id, None)
-                        self.active_user_id = None
-                        # 추후에 countdown 기능 추가 예정
-            else: # active_user_id이 roi 안에 있다면
+                        # print('Switch to video mode!')
+                        # self.current_view_mode = 'video' # -> 체험 초기화로 수정 예정
+                        # self.roi_enter_time.pop(self.active_user_id, None)
+                        # self.id_last_seen.pop(self.active_user_id, None)
+                        # self.active_user_id = None
+                        # # 추후에 countdown 기능 추가 예정
+                        self.countdown_fun(check_time, 10) # 10초동안 
+                        if self.experience_start_check == 0:
+                            print('User lost. Reset experience mode')
+                            self.reset_experience()
+                            # self.roi_enter_time.pop(self.active_user_id, None)
+                            # self.id_last_seen.pop(self.active_user_id, None)
+                            # self.active_user_id = None
+            else: # active_user_id가 roi 안에 있다면
                 self.id_last_seen[self.active_user_id] = now # active_user_id가 roi에 있으므로 last_seen 업데이트
-            # else: # active_user_id이 존재하지 않는다면 (탈주상황)
-            #     print('[Debug] No active user found. Checking for new users in ROI...')
-            #     if ids_in_roi: # 다른 사람이 roi에 들어온 경우, active_user_id 초기화
-            #         new_active_id = max(ids_in_roi, key=lambda x: x['area'])['id']
-            #         stay = now - self.roi_enter_time.get(new_active_id, now)
-            #         if stay >= self.new_user_threshold_sec:
-            #             self.active_user_id = new_active_id # active_user_id 변경
-            #             print('No active user, but another person is in the ROI. Switching to new active user!')
-            #     pass
-     
+        else:
+            print('[Debug][handle_roi] No active user found.')
+            return
 
-
+    def show_video_mode(self):
+        
+        self.stack.setCurrentWidget(self.page_video)
+        
+        self.widget_sub.hide()
+        
+        # self.h_layout_main.setStretch(0, 0)
+        # self.h_layout_main.setStretch(1, 1)
+        
+    def show_webcam_mode(self):
+        # self.stack.setCurrentWidget(self.page_webcam)
+        
+        self.widget_sub.show()
+        
+        # self.h_layout_main.setStretch(0, 2)
+        # self.h_layout_main.setStretch(1, 5)
+        
+    def update_scoretable(self, stage_result, row:int):
+        if stage_result is None:
+            return
+        self.widget_scoretable.setItem(row, 0, QTableWidgetItem(str(row+1)))
+        self.widget_scoretable.setItem(row, 1, QTableWidgetItem(stage_result.action_name))
+        # 정확도 = conf_mean
+        self.widget_scoretable.setItem(row, 2, QTableWidgetItem(f'{stage_result.conf_mean:.1f}%'))
+        # 안정성 = detect_ratio
+        self.widget_scoretable.setItem(row, 3, QTableWidgetItem(f'{stage_result.detect_ratio:.1f}%'))
+        # 평균 = total_score
+        item_score = QTableWidgetItem(f'{stage_result.total_score:.1f}%')
+        item_score.setTextAlignment(Qt.AlignCenter)
+        self.widget_scoretable.setItem(row, 4, item_score)
+        
+        print(f'[Debug][update_scoretable] row: {row}, 업데이트: {stage_result.action_name} -> {stage_result.total_score:.1f}점]')
+    
+    # def _get_current_rank(self, socre:float) -> int:
+    #     rank = 1
+    #     for row in range(self.widget_rank.rowCount):
+    #         item = self.widget_rank.item(row,1)
+    #         if item and item.text():
+    #             try:
+    #                 existing = float(item.text())
+    #                 if existing > score:
+    #                     rank += 1
+    #                 pass
+    #             except ValueError:
+    #                 pass
+    #     return rank
             
+    def update_rank_table(self):
+        
+        total_score = self.exp_evaluator.get_total_score()
+        
+        scores = []
+        
+        for row in range(self.widget_rank.rowCount()):
+            item = self.widget_rank.item(row, 1)
+            if item and item.text():
+                try:
+                    scores.append(float(item.text()))
+                except ValueError:
+                    pass
+            
+        scores.append(total_score)
+        scores.sort(reverse=True)
+        
+        new_row_idx = None # 현재 점수 랭크
+        for i in range(len(scores)-1, -1, -1):
+            if scores[idx] == total_score:
+                new_row_idx = idx
+                break
+                
+        self.widget_rank.setSortingEnabled(False)
+        
+        for idx, score in enumerate(scores):
+            is_new = (idx == new_row_idx)
+            item = self.widget_rank.item(row, 1)
+                
+            # 순위
+            rank_item = QTableWidgetItem(str(idx + 1))
+            rank_item.setTextAlignment(Qt.Aligncenter)
+            
+            # 점수
+            score_itme = QTableWidgetItem(f'{score:.1f}')
+            score_item.setTextAlignment(Qt.AlignCenter)
+            
+            if is_new:
+                for item in (rank_item, score_time):
+                    item.setBackground(self.COLOR_NEW_BG)
+                    item.setForeground(self.COLOR_NEW_TEXT)
+            else:
+                bg = self.COLOR_ODD_BG if idx % 2 == 0 else self.COLOR_EVEN_BG
+                for item in (rank_item, score_time):
+                    item.setBackground(bg)
+                    
+            self.widget_rank.setItem(idx, 0, rank_item)
+            self.widget_rank.setItem(idx, 1, score_item)
+            
+        for idx in range(len(scores), self.widget_rank.rowCount()):
+            self.widget_rank.setItem(idx, 0, QTableWidgetItem(""))
+            self.widget_rank.setItem(idx, 1, QTableWidgetItem(""))
+            
+        if new_row_idx is not None:
+            self.widget_rank.scrollToItem(self.widget_rank.item(new_row_idx, 0))
+            
+        rank_display = (new_row_idx + 1) if new_row_idx is not None else len(scores)
+        
+            
+        # rank_display = self._get_current_rank(total_score)
+        self.widget_scoretext.setItem(f'축하합니다! 성공하셨습니다!\
+                                      \n총점 : {total_score:1.f}점 | 현재 {rank_display}위 입니다.')
+
+        print(f'[Debug][update_rank_table] 랭킹 테이블 업데이트, {rank_display}위,  점수: {total_score:.1f}]')
+        
     @Slot(dict)
     def update_controller(self, result_dict):
         
         frame = result_dict["frame"]
         detections = result_dict["detections"]
         human_exists = result_dict["human_exists"]
-        self.handle_roi(detections)
+        action_results = result_dict.get("action_results", {})
+        keypoints_dict = result_dict.get("keypoints", {})
         
+        self.handle_roi(detections)
+                
         self.cleanup_old_ids(time.time())
+        
         if len(self.id_last_seen) > 50:
             print(f"[ROI] tracking ids : {len(self.id_last_seen)}")
         
-        if self.current_view_mode == 'video':
-            self.canvas.update_frame(frame, detections, self.roi, self.active_user_id)
+        # if self.current_view_mode == 'video':
+        #     self.show_video_mode()
             
-        elif self.current_view_mode == 'webcam':
-            self.canvas.update_frame(frame, detections, self.roi, self.active_user_id, webcam_mode=True)
+        # elif self.current_view_mode == 'webcam':
+        #     self.show_webcam_mode()
+        #     self.canvas.update_frame(frame, detections, self.roi, self.active_user_id, webcam_mode=True)
+        # print(f'[Debug] Active user ID: {self.active_user_id}, Current view mode: {self.current_view_mode}, IDs in ROI: {[x["id"] for x in detections if self.is_inside_roi(x["bbox"])]}')
+        # print(f'[Debug] ROI enter times: {self.roi_enter_time}, ID last seen: {self.id_last_seen}')
+        # print(f'[Debug] Detections: {detections}')
+        # print(f'[Debug] Human exists: {human_exists}')
+        
+        # 사람이 roi 안에 일정시간 이상 존재하면 체험 스타트 시그널 발생
+        
+        # if self.! > self.roi_threshold_sec:
+        #     if self.experience_start_check == 0:
+        #         self.experience_start_check = time.time()
+        #     duration = 4 - int(time.time() - self.experience_start_check)
+        #     countdown = {'color' : 'red',
+        #                  'time' : duration-1}
+        #     if duration < 0:
+        #         self.human_time = 0
+        #         self.experience_start_check = 0
+        # else :
+        #     countdown = None
+        
+
+        if self.active_user_id:
+            print(f'[Debug][update_controller] active user id: {self.active_user_id}, human time: {self.human_time}')
+                          
             
+            if self.current_view_mode == 'webcam':
+                self.mode_1()
+                if self.audio.play_sound("hello.mp3"):
+                    # print("음성 출력 성공")
+                    print('[Debug][update_controller] hello.mp3 음성 출력 완료')
+                self.current_view_mode = 'mode2_1'
+                    
+                    
+                    # self.current_view_mode = 'mode2'
+            elif self.current_view_mode == 'mode2_1':
+                if self.audio.play_check() == 'hello.mp3':
+                    self.audio.play_sound('action_1.mp3')
+                    print('[Debug][update_controller_1] try to play action_1.mp3]')
+                    if self.audio.play_check() == 'action_1.mp3':
+                        self.mode_2_1()
+                        print('[Debug][update_controller_1] action_1.mp3 음성 출력 완료')
+                    # print("음성 출력 성공")
+                    # self.mode_2_1()
+                elif self.audio.play_check() == 'action_1.mp3':
+                    self.audio.update()
+                    print(f'[Debug][update_controller_2] {self.audio.play_check()}')
+                elif self.audio.play_check() == None:
+                    self.countdown_fun(10,3)
+                    print(f'[Debug][update_controller_3] count_down?')
+                    if self.countdown_off:
+                        self.countdown = None
+                        self.audio.play_sound('10seconds.mp3')
+                elif self.audio.play_check() == '10seconds.mp3':
+                    self.countdown_fun(10,5)
+                    self.action_recogniton = True
+                    if self.action_recogniton:
+                        if self._eval_stage != 0:
+                            self._eval_stage = 0
+                            self.exp_evaluator.start_stage(0)
+                        action_results = result_dict.get("action_results", {}).get(self.active_user_id, [])
+                        self.exp_evaluator.add_frame(action_results, keypoints=None)
+                    print(f'[Debug][update_controller_4] do it !!!')
+                    if self.countdown_off:
+                        if self._eval_stage == 0:
+                            stage_result = self.exp_evaluator.end_stage()
+                            self._eval_stage = -1
+                            self.update_scoretable(stage_result, row = 0)
+                            
+                        self.current_view_mode = 'mode2_2'
+                        self.countdown_off = False
+                        self.countdown = None
+                        # self.human_time = 0
+                        self.action_recogniton = False
+                        # text = "2단계. 붐 올리기. 동작을 취해보세요"
+                        # tts = gTTS(text=text, lang='ko')
+                        # tts.save("action_2.mp3")
+                        print(f'[Debug][update_controller] {self.audio.play_check()}')
+                        self.audio.play_sound("action_2.mp3")
+                        self.mode_2_2()
+                        print(f'[Debug][update_controller_5] mode change to {self.current_view_mode}')
+                        print('[Debug][update_controller_5] action_2.mp3 음성 출력 완료')
+            
+            elif self.current_view_mode == 'mode2_2':
+                if self.audio.play_check() == 'action_2.mp3':
+                    self.audio.update()
+                    print(f'[Debug][update_controller_6] {self.audio.play_check()}')
+                elif self.audio.play_check() == None:
+                    self.countdown_fun(10,3)
+                    print(f'[Debug][update_controller_7] count_down?')
+                    if self.countdown_off:
+                        self.audio.play_sound('10seconds.mp3')
+                        self.countdown = None
+                        print(f'[Debug][update_controller_8] {self.audio.play_check()}')
+                elif self.audio.play_check() == '10seconds.mp3':
+                    self.countdown_fun(10, 5)
+                    self.action_recogniton = True
+                    
+                    if self.action_recogniton:
+                        if self._eval_stage != 0:
+                            self._eval_stage = 0
+                            self.exp_evaluator.start_stage(0)
+                        action_results = result_dict.get("action_results", {}).get(self.active_user_id, [])
+                        self.exp_evaluator.add_frame(action_results, keypoints=None)
+                        print(f'[Debug][update_controller_9] do it !!!')
+                    
+                    if self.countdown_off:
+                        
+                        if self._eval_stage == 0:
+                            stage_result = self.exp_evaluator.end_stage()
+                            self._eval_stage = -1
+                            self.update_scoretable(stage_result, row = 0)
+                            
+                        self.countdown = None
+                        self.current_view_mode = 'mode2_3'
+                        self.countdown_off = False
+                        self.action_recogniton = False
+                        # text = "3단계. 비상정지. 동작을 취해보세요"
+                        # tts = gTTS(text=text, lang='ko')
+                        # tts.save("action_3.mp3")
+                        self.audio.play_sound("action_3.mp3")
+                        self.mode_2_3()
+                        print(f'[Debug][update_controller_10] mode change to {self.current_view_mode}')
+                        print('[Debug][update_controller_10] action_3.mp3 음성 출력 완료')
+                        
+            elif self.current_view_mode == 'mode2_3':
+                if self.audio.play_check() == 'action_3.mp3':
+                    self.audio.update()
+                    print(f'[Debug][update_controller_11] {self.audio.play_check()}')
+                elif self.audio.play_check() == None:
+                    self.countdown_fun(10, 3)
+                    print(f'[Debug][update_controller_12] count_down?')
+                    if self.countdown_off:
+                        self.countdown = None
+                        self.audio.play_sound('10seconds.mp3')
+                        print(f'[Debug][update_controller_13] {self.audio.play_check()}')
+                elif self.audio.play_check() == '10seconds.mp3':
+                    self.countdown_fun(10, 5)
+                    self.action_recogniton = True
+                    
+                    if self.action_recogniton:
+                        if self._eval_stage != 0:
+                            self._eval_stage = 0
+                            self.exp_evaluator.start_stage(0)
+                        action_results = result_dict.get("action_results", {}).get(self.active_user_id, [])
+                        self.exp_evaluator.add_frame(action_results, keypoints=None)
+                    
+                    if self.countdown_off:
+                        
+                        if self._eval_stage == 0:
+                            stage_result = self.exp_evaluator.end_stage()
+                            self._eval_stage = -1
+                            self.update_scoretable(stage_result, row = 0)
+                            
+                    
+                        print(f'[Debug][update_controller_14] do it !!!')
+                        self.current_view_mode = 'mode_3'
+                        self.countdown_off = False
+                        self.action_recogniton = False
+                        self.countdown = None
+                        self.mode_3()
+                        print(f'[Debug][update_controller_15] mode change to {self.current_view_mode}')
+                        print('[Debug][update_controller_15] action_4.mp3 음성 출력 완료')
+            
+            elif self.current_view_mode == 'mode_3':
+                print('평가모듈 실행중!!!!!!!!!!!')
+                # 평가모듈을 실행하여 그 결과를 table에 넣고, rank table에도 자동으로 업데이트
+                
+                
+                
+                
+                
+                # if self.human_time == 0:
+                #     now = time.time()
+                #     stay_time = now - self.roi_enter_time[self.active_user_id]
+                #     self.human_time = stay_time
+                    
+                #     self.countdown_fun(stay_time)
+                    # text = "안녕하세요. 파이썬 음성 테스트입니다."
+                    # tts = gTTS(text=text, lang='ko')
+                    # tts.save("hello.mp3")
+                
+                
+                
+        self.canvas.update_frame(frame, self.countdown)
+            
+        view_mode = { 'mode' : self.current_view_mode , 'action_recognition' : self.action_recogniton}
+        
+        self.signalviewinfo.emit(view_mode)
+        
+        # if self.current_view_mode == 'webcam':
+        #     self.show_webcam_mode()
+        #     # print(f'[Debug][Main] current_view_mode: {self.current_view_mode}')
+        #     # self.canvas.update_frame(frame, detections, self.roi, self.active_user_id, webcam_mode=True)
+        # elif self.current_view_mode == 'video':
+        #     self.show_video_mode()
+            # print(f'[Debug][Main] current_view_mode: {self.current_view_mode}')
+        # elif self.current_view_mode == 
+        
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
