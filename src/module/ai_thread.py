@@ -24,7 +24,7 @@ from mmpose.evaluation.functional import nms
 from mmpose.apis import inference_topdown
 from mmaction.apis import inference_skeleton, inference_recognizer
 
-from PySide6.QtCore import QThread, Signal
+from PySide6.QtCore import QThread, Signal, Slot
 from PySide6.QtGui import QImage
 
 np.set_printoptions(suppress=True)
@@ -36,7 +36,8 @@ def get_resource_dir():
     return Path(__file__).resolve().parent
 
 class AiThread(QThread):
-    signalSetImage = Signal(QImage)
+    # signalSetImage = Signal(QImage)
+    signalSetImage = Signal(dict)
     
     def __init__(self, RESOURCE_DIR, parent=None):
         super().__init__()
@@ -84,6 +85,10 @@ class AiThread(QThread):
         self.skeleton_alpha = 0.6
         self.text_alpha = 0.3
 
+        # taewon
+        self.frame_drop = 0
+        self.current_view_mode = 'webcam'
+        
         # -------------------
         # action
         # self.window_size = 32
@@ -154,17 +159,21 @@ class AiThread(QThread):
                 ret, frame = self.frame_loader.read()
                 if not ret:
                     print('Failed to capture frame from camera.')
-                    self.cap.release()
-                    print('Camera released.')
-                    # time.sleep(1)  # 잠시 대기 후 재시도
+                    if self.frame_drop > 30:
+                        self.cap.release()
+                        print('Camera released.')
+                    sleep(1)  # 잠시 대기 후 재시도
+                    self.frame_drop += 1
+                    print(f'frame drop 발생 : {self.frame_drop}')
                     self.cap = cv2.VideoCapture(0)
                     continue
+                self.frame_drop = 0
                 # frame = self.frame_loader.get_frame()
                 # if frame is None:
                 #     # print('skip !!!!!!!!')
                 #     continue
-                print()
-                print('=================================================')
+                # print()
+                # print('=================================================')
                 rgb_img = frame[:, :, ::-1]
 
                 h, w, _ = rgb_img.shape
@@ -190,7 +199,14 @@ class AiThread(QThread):
                 if not True in person_idx_lst:
                     result_img = np.ascontiguousarray(rgb_img)
                     qimg = self.convert_qimage(result_img)
-                    self.signalSetImage.emit(qimg)
+                    # self.signalSetImage.emit(qimg)
+                    # ai_result
+                    result_dict = {
+                        "frame": qimg,
+                        "detections": output_bboxes,
+                        "human_exists": len(output_bboxes) > 0
+                    }
+                    self.signalSetImage.emit(result_dict)
                     continue
 
                 people_bboxes = output_bboxes[person_idx_lst] # (M, 4)
@@ -217,6 +233,7 @@ class AiThread(QThread):
                         # (M, 7) -> [ [x1, y1, x2, y2, idx, cls, conf], ... ]
                         tracked_bboxes = self.tracker_list.update(torch.tensor(track_bboxes), rgb_img)
                     else:
+                        tracked_bboxes = np.empty((0, 7))
                         pass
                 except:
                     print('[ERROR][AI] {0}'.format(traceback.format_exc()))
@@ -227,6 +244,8 @@ class AiThread(QThread):
                 now_frame_id = []
 
                 self.multi_pose_timer.set_prev()
+                
+                keypoints_per_id = {}
 
                 for single_bbox in tracked_bboxes:
                     identification = single_bbox[4]
@@ -313,6 +332,11 @@ class AiThread(QThread):
                     # (17,4)
                     person_info = np.squeeze(person_info)
                     multi_pose_results.append(person_info)
+                    
+                    # 먼저 17개만 획득 -> 손가락 번호까지 고려해서 획득 후, 손가락위치 판단 활용 예정
+                    kpts_xy = person_keypoints[0, :17, :] # (17,2)
+                    keypoints_per_id[int(identification)] = kpts_xy
+                    
 
                 # (M, 17, 4)
                 keypoints_info = np.array(multi_pose_results)
@@ -324,6 +348,8 @@ class AiThread(QThread):
                 self.multi_pose_duration.append(self.multi_pose_timer.get_elapsed())
 
                 # -------------------------------------------------------
+                action_results_per_id = {}
+                # keypoints_per_id = {}
                 # Action
                 for key, result_lst in pose_results.items():
                     if key in now_frame_id:
@@ -361,45 +387,60 @@ class AiThread(QThread):
 
                             if len(filtered_bbox) > 0:
                                 rgb_img = self.visualize_action(rgb_img, filtered_bbox[0], action_label_results)
-
+                        # action result id 별로 정리
+                        action_results_per_id[int(key)] = action_label_results
                 # -------------------------------------------------------
                 # Visualize
                 rgb_img = self.visualize_bbox(rgb_img, tracked_bboxes)
 
                 rgb_img = self.visualize_pose(rgb_img, keypoints, keypoints_scores, self.kpt_thr)
-
-                fps = self.getFps()
+                
+                ########################
+                # fps = self.getFps()
+                fps = 30 # 임시로 수정
+                ########################
+                
                 rgb_img = self.draw_fps(rgb_img, fps)
 
                 # -------------------------------------------------------
                 # to screen
                 result_img = np.ascontiguousarray(rgb_img)
                 qimg = self.convert_qimage(result_img)
-                self.signalSetImage.emit(qimg)
+                # self.signalSetImage.emit(qimg)
+                
+                # ai_result
+                result_dict = {
+                    "frame": qimg,
+                    "detections": tracked_bboxes,
+                    "human_exists": len(tracked_bboxes) > 0,
+                    "action_results": action_results_per_id, #
+                    "keypoints": keypoints_per_id, # 
+                }
+                self.signalSetImage.emit(result_dict)
 
                 # fps = self.getFps()
-                print()
-                print('-----------------------------------------')
-                print(f'Total sec : {(1/fps):.3f}')
-                print(f'Total fps : {fps:.1f}')
-                print()
-                det_sec = sum(self.det_duration) / len(self.det_duration)
-                pose_sec = sum(self.pose_duration) / len(self.pose_duration)
-                multi_pose_sec = sum(self.multi_pose_duration) / len(self.multi_pose_duration)
-                action_sec = sum(self.action_duration) / len(self.action_duration)
+                # print()
+                # print('-----------------------------------------')
+                # print(f'Total sec : {(1/fps):.3f}')
+                # print(f'Total fps : {fps:.1f}')
+                # print()
+                # det_sec = sum(self.det_duration) / len(self.det_duration)
+                # pose_sec = sum(self.pose_duration) / len(self.pose_duration)
+                # multi_pose_sec = sum(self.multi_pose_duration) / len(self.multi_pose_duration)
+                # action_sec = sum(self.action_duration) / len(self.action_duration)
 
-                print(f'Det sec : {(det_sec):.3f}')
-                print(f'Det fps : {(1/det_sec):.1f}')
-                print()
-                print(f'Pose sec : {(pose_sec):.3f}')
-                print(f'Pose fps : {(1/pose_sec):.1f}')
-                print()
-                print(f'Multi Pose sec : {(multi_pose_sec):.3f}')
-                print(f'Multi Pose fps : {(1/multi_pose_sec):.1f}')
-                print()
-                print(f'Action sec : {(action_sec):.3f}')
-                print(f'Action fps : {(1/action_sec):.1f}')
-                print()
+                # print(f'Det sec : {(det_sec):.3f}')
+                # print(f'Det fps : {(1/det_sec):.1f}')
+                # print()
+                # print(f'Pose sec : {(pose_sec):.3f}')
+                # print(f'Pose fps : {(1/pose_sec):.1f}')
+                # print()
+                # print(f'Multi Pose sec : {(multi_pose_sec):.3f}')
+                # print(f'Multi Pose fps : {(1/multi_pose_sec):.1f}')
+                # print()
+                # # print(f'Action sec : {(action_sec):.3f}')
+                # # print(f'Action fps : {(1/action_sec):.1f}')
+                # print()
                 
 
             except:
@@ -534,8 +575,8 @@ class AiThread(QThread):
         img = cv2.resize(frame, (0, 0), fx=scale, fy=scale)
         
         overlay = img.copy()
-        print(keypoints.shape)
-        print(scores.shape)
+        # print(keypoints.shape)
+        # print(scores.shape)
         for kpts, score in zip(keypoints, scores):
             show = [0] * len(kpts)
             for (u, v), color in zip(skeleton, link_color):
@@ -655,6 +696,11 @@ class AiThread(QThread):
         self._running = False
         self.quit()
         self.wait()
+    
+    @Slot(dict)
+    def update_status(self, status):
+        self.current_view_mode = status['mode']
+        # print(f'[Debug][AI Thread] mode : {self.current_view_mode}')
         
 if __name__ == "__main__":
     print('Test start')
