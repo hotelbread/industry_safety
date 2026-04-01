@@ -2,7 +2,6 @@ import cv2
 import torch
 import numpy as np
 import traceback
-import time
 from time import sleep, perf_counter
 
 import sys
@@ -93,8 +92,8 @@ class AiThread(QThread):
         # -------------------
         # action
         # self.window_size = 32
-        self.window_size = 48
-        # self.window_size = 64
+        # self.window_size = 48
+        self.window_size = 64
         # self.window_size = 100
         self.action_thr = 0.1
         self.K = 3
@@ -163,7 +162,7 @@ class AiThread(QThread):
                     if self.frame_drop > 30:
                         self.cap.release()
                         print('Camera released.')
-                    time.sleep(1)  # 잠시 대기 후 재시도
+                    sleep(1)  # 잠시 대기 후 재시도
                     self.frame_drop += 1
                     print(f'frame drop 발생 : {self.frame_drop}')
                     self.cap = cv2.VideoCapture(0)
@@ -198,12 +197,14 @@ class AiThread(QThread):
                 person_idx_lst = np.logical_and(output_labels == self.det_cat_id,
                                                 output_scores > self.bbox_thr)
                 if not True in person_idx_lst:
+                    result_img = np.ascontiguousarray(rgb_img)
+                    qimg = self.convert_qimage(result_img)
+                    # self.signalSetImage.emit(qimg)
+                    # ai_result
                     result_dict = {
-                        "frame_raw"            : np.ascontiguousarray(rgb_img),
-                        "detections"           : np.empty((0, 7), dtype=np.float32),
-                        "human_exists"         : False,
-                        "action_results"       : {},
-                        "keypoints_scores_pair": None,
+                        "frame": qimg,
+                        "detections": output_bboxes,
+                        "human_exists": len(output_bboxes) > 0
                     }
                     self.signalSetImage.emit(result_dict)
                     continue
@@ -227,11 +228,13 @@ class AiThread(QThread):
 
                 # -------------------------------------------------------
                 # OC-SORT
-                tracked_bboxes = np.empty((0, 7), dtype=np.float32)  # 기본값
                 try:
                     if len(track_bboxes) > 0:
                         # (M, 7) -> [ [x1, y1, x2, y2, idx, cls, conf], ... ]
                         tracked_bboxes = self.tracker_list.update(torch.tensor(track_bboxes), rgb_img)
+                    else:
+                        tracked_bboxes = np.empty((0, 7))
+                        pass
                 except:
                     print('[ERROR][AI] {0}'.format(traceback.format_exc()))
 
@@ -239,9 +242,10 @@ class AiThread(QThread):
 
                 multi_pose_results = []
                 now_frame_id = []
-                keypoints_per_id      = {}
-                
+
                 self.multi_pose_timer.set_prev()
+                
+                keypoints_per_id = {}
 
                 for single_bbox in tracked_bboxes:
                     identification = single_bbox[4]
@@ -329,9 +333,10 @@ class AiThread(QThread):
                     person_info = np.squeeze(person_info)
                     multi_pose_results.append(person_info)
                     
-                    # id별 키포인트 저장 (테스트)
-                    person_keypoints_full = single_pose_result[0].get('pred_instances').get('keypoints') # shape : (1, 133, 2)
-                    keypoints_per_id[int(identification)] = person_keypoints_full[0, :, :2] # (133,2)
+                    # 먼저 17개만 획득 -> 손가락 번호까지 고려해서 획득 후, 손가락위치 판단 활용 예정
+                    kpts_xy = person_keypoints[0, :17, :] # (17,2)
+                    keypoints_per_id[int(identification)] = kpts_xy
+                    
 
                 # (M, 17, 4)
                 keypoints_info = np.array(multi_pose_results)
@@ -343,72 +348,73 @@ class AiThread(QThread):
                 self.multi_pose_duration.append(self.multi_pose_timer.get_elapsed())
 
                 # -------------------------------------------------------
+                action_results_per_id = {}
+                # keypoints_per_id = {}
                 # Action
-                action_results_per_id = {}   # { int(id): [{class_idx, conf}, ...] }
-                # keypoints_per_id      = {}   # { int(id): ndarray (17, 2) }
-                # action_scores_np        = None
                 for key, result_lst in pose_results.items():
                     if key in now_frame_id:
-                        action_scores_np        = None # 수정
                         action_label_results = []
+                        # print(f'ID {int(key)} : {len(result_lst)}')
                         if len(result_lst) >= self.window_size:
                             action_input = result_lst[-(self.window_size):]
 
                             self.action_timer.set_prev()
+
                             action_result = inference_skeleton(self.action_recognizer.action_recognizer, action_input, (h, w))
+                            # action_result = inference_recognizer(self.action_recognizer, pose_results)
+
                             self.action_timer.calc_elapsed()
                             self.action_duration.append(self.action_timer.get_elapsed())
+                            # self.action_timer.print_fps()
+                            # self.action_timer.print_sec()
 
-                            
-                            action_scores_np = action_result.pred_score.cpu().numpy()  # shape (num_classes,)
+                            action_scores = action_result.pred_score
 
-                        action_results_per_id[int(key)] = action_scores_np # 추가
-                        
-                            # action_scores = action_result.pred_score
-                            # while True:
-                            #     max_pred_index = action_scores.argmax().item()
-                            #     action_label   = self.label_map[max_pred_index]
-                            #     action_conf    = action_scores[max_pred_index].item()
-                            #     if action_conf > self.action_thr:
-                            #         # action_label_results.append({'label': action_label, 'conf': action_conf})
-                            #         action_label_results.append({'class_idx': max_pred_index, 'conf': action_conf})
-                            #         if len(action_label_results) == self.K:
-                            #             break
-                            #         action_scores[max_pred_index] = 0
-                            #     else:
-                            #         break
+                            while True:
+                                max_pred_index = action_scores.argmax().item()
+                                action_label = self.label_map[max_pred_index]
+                                action_conf = action_scores[max_pred_index].item()
+                                if action_conf > self.action_thr:
+                                    action_label_results.append({'label': action_label, 'conf': action_conf})
+                                    # Top K (K = 3)
+                                    if len(action_label_results) == self.K:
+                                        break
+                                    action_scores[max_pred_index] = 0
+                                else:
+                                    break
 
-                        
-                """
-                        # 일단 전부 날것으로
-                        if action_scores_np is not None:
-                            # print(f'[Debug][AI] action_scores_np : {action_scores_np}]')
-                            action_results_per_id[int(key)] = action_scores_np
-                        else:
-                            action_results_per_id[int(key)] = None
-                        
-                        # # id별 action 결과 저장
-                        # action_results_per_id[int(key)] = action_label_results
-                
-                # keypoints_per_id 구성 (tracked_bboxes 순서로)
-                for single_bbox in tracked_bboxes:
-                    pid = int(single_bbox[4])
-                    # multi_pose_results에서 해당 id 위치 찾기
-                    for idx, bbox in enumerate(tracked_bboxes):
-                        if int(bbox[4]) == pid and idx < len(multi_pose_results):
-                            kpts_xy = multi_pose_results[idx][:, :2]  # (17, 2)
-                            keypoints_per_id[pid] = kpts_xy
-                            break
-                """            
-                
+                            filtered_bbox = [row for row in tracked_bboxes if row[4] == int(key)]
+
+                            if len(filtered_bbox) > 0:
+                                rgb_img = self.visualize_action(rgb_img, filtered_bbox[0], action_label_results)
+                        # action result id 별로 정리
+                        action_results_per_id[int(key)] = action_label_results
                 # -------------------------------------------------------
-                # emit — 원본 numpy + AI 결과값만 전달 (시각화 X)
+                # Visualize
+                rgb_img = self.visualize_bbox(rgb_img, tracked_bboxes)
+
+                rgb_img = self.visualize_pose(rgb_img, keypoints, keypoints_scores, self.kpt_thr)
+                
+                ########################
+                # fps = self.getFps()
+                fps = 30 # 임시로 수정
+                ########################
+                
+                rgb_img = self.draw_fps(rgb_img, fps)
+
+                # -------------------------------------------------------
+                # to screen
+                result_img = np.ascontiguousarray(rgb_img)
+                qimg = self.convert_qimage(result_img)
+                # self.signalSetImage.emit(qimg)
+                
+                # ai_result
                 result_dict = {
-                    "frame_raw"            : np.ascontiguousarray(rgb_img),
-                    "detections"           : tracked_bboxes,          # (M, 7)
-                    "action_results"       : action_results_per_id,   # {int: [{label,conf}]}
-                    "keypoints_scores_pair": (keypoints, keypoints_scores),  # (M,17,2), (M,17)
-                    "keypoints"            : keypoints_per_id,               # {int: (17, 2)}
+                    "frame": qimg,
+                    "detections": tracked_bboxes,
+                    "human_exists": len(tracked_bboxes) > 0,
+                    "action_results": action_results_per_id, #
+                    "keypoints": keypoints_per_id, # 
                 }
                 self.signalSetImage.emit(result_dict)
 

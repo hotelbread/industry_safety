@@ -3,17 +3,19 @@ import sys
 import cv2
 import csv
 import time
+import bisect
 import numpy as np
 from pathlib import Path
 from datetime import datetime
 import traceback
 
-from gtts import gTTS
+# from gtts import gTTS
 from src.module.audio_manager import AudioManager
 from src.module.evaluation_module import ExperienceEvaluator
 
 from PySide6.QtWidgets import QMainWindow, QVBoxLayout, QHBoxLayout, QWidget, QLabel, QApplication, QStackedWidget, QPushButton, QTableWidget, QTableWidgetItem, QHeaderView 
 from PySide6.QtCore import Qt, QMutex, Slot, QUrl, QTimer, Signal
+from PySide6.QtGui import QColor
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput #동영상용
 from PySide6.QtMultimediaWidgets import QVideoWidget        #동영상용
 
@@ -23,7 +25,7 @@ from PySide6.QtMultimediaWidgets import QVideoWidget        #동영상용
 
 from src.gui_module.canvas import Canvas
 from src.module.ai_thread import AiThread
-from src.module.vid_thread import VidThread
+# from src.module.vid_thread import VidThread
 # from src.module.video_thread import VideoThread
 # from src.module.inf_thread import InferenceThread
 import src.misc.tools as tools
@@ -83,6 +85,7 @@ class MW(QMainWindow):
         self.COLOR_NEW_TEXT = '#A8FFDA'   # 새 행 텍스트
         self.COLOR_ODD_BG   = '#3D3D3D'   # 기존 홀수 행 배경 (기존 AlternatingRowColors 대체)
         self.COLOR_EVEN_BG  = '#2C2C2C'   # 기존 짝수 행 배경
+        self.COLOR_TEXT = '#E2E8F0'
         
         self.COLOR_RED = '#E6544E'
         self.COLOR_DEEP_RED = '#870601'
@@ -145,15 +148,33 @@ class MW(QMainWindow):
         self.countdown = None
         self.countdown_duration = 3  # seconds
         self.rank = 1
+        self.stage = 0 # current_view 아래에서 세부단위 조절용
         self.human_time = 0 # roi내에 서있던시간
         self.experience_start_check = 0
         self.action_recogniton = False
-        self.countdown_off = False
-        self.STAGE_NAMES = ["붐 올리기", "권상", "비상 정지"]
+        self.countdown_off = True
         self._eval_stage = -1 # 0, 1, 2 / -1은 수집X 
+        self._highlighted_rank_row = None # 마지막 rank table 업데이트한 행 기억
 
-        self.exp_evaluator = ExperienceEvaluator(self.STAGE_NAMES)
+        # self.STAGE_NAMES = ["붐 올리기", "권상", "비상 정지"]
+        self.STAGE_NAMES = {}
+        label_map_path = 'model/action/label_map_hsd_S001.txt'
+        try:
+            labels = [x.strip() for x in open(label_map_path).readlines()]
+            self.STAGE_NAMES = {i: label for i, label in enumerate(labels)}
+        except:
+            self.STAGE_NAMES = {
+                0 : 'Etc',
+                1 : "Raise Boom",
+                2 : "Raise Load",
+                3 : "Emergency Stop"
+            }
+        
+        # self.STAGE_NAMES = ['Etc', "Raise Boom", "Raise Load", "Emergency Stop"]
+        self.STAGE_CLASS_IDXS = [2,1,0]
+        self.exp_evaluator = ExperienceEvaluator(self.STAGE_NAMES, self.STAGE_CLASS_IDXS)
         self.audio = AudioManager()
+        self.action_flag = 0
            
         ######################################################
         # -----------------------------------------------------------------
@@ -451,6 +472,7 @@ class MW(QMainWindow):
         self.v_layout_second.setContentsMargins(0, 0, 0, 0)
         self.v_layout_second.addLayout(self.h_layout_main)
         
+        """
         # 전환버튼
         self.btn_layout = QHBoxLayout()
         self.btn_layout.setContentsMargins(0, 0, 0, 0)
@@ -479,6 +501,7 @@ class MW(QMainWindow):
         self.btn_score.clicked.connect(self.mode_3)
         
         self.v_layout_second.addLayout(self.btn_layout)
+        """
         
         ## rank board layout (2-2, 시계 + 제목 + 점수보드 + 취소버튼)
         # label date
@@ -509,7 +532,8 @@ class MW(QMainWindow):
         
         self.widget_rank = QTableWidget()
         
-        self.widget_rank.setRowCount(30)
+        self.widget_rank.setRowCount(0)
+        # self.widget_rank.setRowCount(30)
         self.widget_rank.setColumnCount(2)
         
         # self.widget_rank.setHorizontalHeaderLabels(['순위', '이름', '체험시간', '점수'])
@@ -646,14 +670,14 @@ class MW(QMainWindow):
         self.widget_sub.setCurrentWidget(self.widget_sub4_1)
         ready_time = 3
         act_time = 5
-        self.anounce_box_1.setText(f'준비되셨나요. \n 그럼 {ready_time}초 후 시작합니다! \n 각 동작은 {act_time}초간 진행하세요')        
+        self.anounce_box_1.setText(f'준비되셨나요. \n 그럼 {ready_time}초 후 시작합니다! \n 각 동작을 {act_time}초간 진행하세요')        
         print(f'[Debug][button1] mode1')
         
     def mode_2_1(self):
         self.widget_sub.setCurrentWidget(self.widget_sub4_2)
         ready_time = 3
         act_time = 5
-        self.anounce_box_2.setText(f'준비되셨나요. \n 그럼 {ready_time}초 후 시작합니다! \n 각 동작은 {act_time}초간 진행하세요')        
+        self.anounce_box_2.setText(f'준비되셨나요. \n 그럼 {ready_time}초 후 시작합니다! \n 각 동작을 {act_time}초간 진행하세요')        
         self.explain_box_2.setText(f'1단계. \n \"붐 올리기\" 동작을 취해보세요.')
         print(f'[Debug][button2] mode2_1')
     
@@ -661,7 +685,7 @@ class MW(QMainWindow):
         self.widget_sub.setCurrentWidget(self.widget_sub4_2)
         ready_time = 3
         act_time = 5
-        self.anounce_box_2.setText(f'준비되셨나요. \n 그럼 {ready_time}초 후 시작합니다! \n 각 동작은 {act_time}초간 진행하세요')        
+        self.anounce_box_2.setText(f'준비되셨나요. \n 그럼 {ready_time}초 후 시작합니다! \n 각 동작을 {act_time}초간 진행하세요')        
         self.explain_box_2.setText(f'2단계. \n \"권상\" 동작을 취해보세요.')
         print(f'[Debug][button2] mode2_2')
         
@@ -669,7 +693,7 @@ class MW(QMainWindow):
         self.widget_sub.setCurrentWidget(self.widget_sub4_2)
         ready_time = 3
         act_time = 5
-        self.anounce_box_2.setText(f'준비되셨나요. \n 그럼 {ready_time}초 후 시작합니다! \n 각 동작은 {act_time}초간 진행하세요')        
+        self.anounce_box_2.setText(f'준비되셨나요. \n 그럼 {ready_time}초 후 시작합니다! \n 각 동작을 {act_time}초간 진행하세요')        
         self.explain_box_2.setText(f'3단계. \n \"비상 정지\" 동작을 취해보세요.')
         print(f'[Debug][button2] mode2_3')
         
@@ -677,8 +701,8 @@ class MW(QMainWindow):
         self.widget_sub.setCurrentWidget(self.widget_sub4_3)
         ready_time = 3
         act_time = 5
-        self.anounce_box_3.setText(f'준비되셨나요. \n 그럼 {ready_time}초 후 시작합니다! \n 각 동작은 {act_time}초간 진행하세요')        
-        self.explain_box_3.setText(f'3단계. \n \"붐 올리기\" 동작을 취해보세요.')
+        self.anounce_box_3.setText(f'준비되셨나요. \n 그럼 {ready_time}초 후 시작합니다! \n 각 동작을 {act_time}초간 진행하세요')        
+        self.explain_box_3.setText(f'3단계. \n \"비상 정지\" 동작을 취해보세요.')
         print(f'[Debug][button3] mode3')
         
     def label_btn_exit_mouseReleaseEvent(self, event):
@@ -690,31 +714,31 @@ class MW(QMainWindow):
         # self.inf_thread.stop()
         sys.exit(0)
 
-    def keyPressEvent(self, event):
-        if event.key() == Qt.Key_Q:
-            self.label_btn_exit_mouseReleaseEvent(event)
-        elif event.key() == Qt.Key_F:
-            if self.isFullScreen():
-                self.showNormal()
-            else:
-                self.showFullScreen()
-        elif event.key() == Qt.Key_P:
-            self.canvas.roi_points = []
-            if self.admin_mode == False:
-                self.admin_mode = True
-                self.canvas.admin_mode = True
-                print("Admin mode activated")
-        elif event.key() == Qt.Key_D:
-            print(f'roi_enter_time : {self.roi_enter_time}')
-            print(f'id_last_seen : {self.id_last_seen}')
-            print(f'active_user_id : {self.active_user_id}')
-        elif event.key() == Qt.Key_Escape:
-            if self.admin_mode == True:
-                self.admin_mode = False
-                self.canvas.admin_mode = False
-                print("Admin mode deactivated")
-        else:
-            pass
+    # def keyPressEvent(self, event):
+    #     if event.key() == Qt.Key_Q:
+    #         self.label_btn_exit_mouseReleaseEvent(event)
+    #     elif event.key() == Qt.Key_F:
+    #         if self.isFullScreen():
+    #             self.showNormal()
+    #         else:
+    #             self.showFullScreen()
+    #     elif event.key() == Qt.Key_P:
+    #         self.canvas.roi_points = []
+    #         if self.admin_mode == False:
+    #             self.admin_mode = True
+    #             self.canvas.admin_mode = True
+    #             print("Admin mode activated")
+    #     elif event.key() == Qt.Key_D:
+    #         print(f'roi_enter_time : {self.roi_enter_time}')
+    #         print(f'id_last_seen : {self.id_last_seen}')
+    #         print(f'active_user_id : {self.active_user_id}')
+    #     elif event.key() == Qt.Key_Escape:
+    #         if self.admin_mode == True:
+    #             self.admin_mode = False
+    #             self.canvas.admin_mode = False
+    #             print("Admin mode deactivated")
+    #     else:
+    #         pass
         
     def save_rank_csv(self):
         now = datetime.now()
@@ -748,7 +772,7 @@ class MW(QMainWindow):
         # 체험흐름
         self.current_view_mode = 'webcam'
         self.countdown = None
-        self.countdown_off = False
+        self.countdown_off = True
         self.experience_start_check = 0
         self.human_time = 0
         self.action_recogniton = False
@@ -760,7 +784,7 @@ class MW(QMainWindow):
         print('[Debug][Main] Experience mode reset 완료!!!]')
         
     def _on_reset_btn(self):
-        self.rank_reset()           # csv 저장 + 테이블초기화
+        # self.rank_reset()           # csv 저장 + 테이블초기화
         self.reset_experience()     # 체험 상태 초기화
         
         
@@ -770,12 +794,33 @@ class MW(QMainWindow):
 
     # global shortcut
     def keyReleaseEvent(self, event):
-       if event.key() == Qt.Key_Q:
+        if event.key() == Qt.Key_Q:
             # sys.exit(0)
             self.label_btn_exit_mouseReleaseEvent(event)
-       else:
-           pass
-
+        elif event.key() == Qt.Key_F:
+            if self.isFullScreen():
+                self.showNormal()
+            else:
+                self.showFullScreen()
+        elif event.key() == Qt.Key_P:
+            self.canvas.roi_points = []
+            if self.admin_mode == False:
+                self.admin_mode = True
+                self.canvas.admin_mode = True
+                print("Admin mode activated")
+        elif event.key() == Qt.Key_D:
+            print(f'roi_enter_time : {self.roi_enter_time}')
+            print(f'id_last_seen : {self.id_last_seen}')
+            print(f'active_user_id : {self.active_user_id}')
+        elif event.key() == Qt.Key_Escape:
+            if self.admin_mode == True:
+                self.admin_mode = False
+                self.canvas.admin_mode = False
+                print("Admin mode deactivated")
+        else:
+            pass
+        
+        
     # log
     @Slot(str)
     def log(self, text=''):
@@ -823,6 +868,11 @@ class MW(QMainWindow):
 
         self.timer.start()
         
+        # 오디오 상태 업데이트 전용 타이머
+        self.audio_timer = QTimer()
+        self.audio_timer.setInterval(100)   # 0.2초마다 체크
+        self.audio_timer.timeout.connect(self.audio.update)
+        self.audio_timer.start()
 
     # def thread_close(self):
     #     # self.inf_thread.stop()
@@ -840,7 +890,6 @@ class MW(QMainWindow):
         cx = (x1 + x2) / 2
         cy = y2
         
-        # result_dict = cv2.pointPolygonTest(self.roi, (cx, cy), False)
         if len(self.canvas.roi_points)<3:
             return False
         
@@ -873,41 +922,44 @@ class MW(QMainWindow):
             if self.experience_start_check == 0:
                 self.experience_start_check = time.time()
             duration = countdown_time + 1 - int(time.time() - self.experience_start_check)
-            font_color = {10 : 'red', 3: 'green', 5 :'blue'}
+            font_color = {10 : 'red', 3: 'green', 5 :'blue', 1 : 'black'}
             self.countdown = {'color' : font_color[countdown_time],
                          'time' : duration-1}
             if duration < 0:
                 # self.human_time = 0
                 self.experience_start_check = 0
                 self.countdown_off = True
+                self.countdown = None
         else :
             self.countdown = None
+            self.experience_start_check = 0 # 다시 초기화
+            self.countdown_off = True
         # self.canvas.update_frame(frame, countdown)
     # ROI 처리
     def handle_roi(self, detections):
-        
+        """_summary_
+
+        Args:
+            detections (_type_): tracked_bboxes, (M, 7)  ex) [x1, y1, x2, y2, id, class, score]
+            
+        """
         now = time.time()
         ids_in_roi = []
+        target_id = None
         
         if len(detections) > 0:
             for det in detections:
-                # bbox = det['bbox']
-                # human_id = det['id']
-                # print(f'[Debug][handle_roi] det: {det}]')
-                # print(f'[Debug][handle_roi] det type: {type(det)}]')
                 if len(det) != 7: # tracking이 되지 않은 경우
                     continue
                 bbox = det[:4]
                 human_id = int(det[4])
-                if self.is_inside_roi(bbox):
+                if self.is_inside_roi(bbox): # True 면 내부에 존재
                     
                     x1, y1, x2, y2 = bbox
                     area = (x2 - x1) * (y2 - y1)
                     ids_in_roi.append({'id': human_id, 
                                     'area': area, 
                                     'bbox': bbox})
-        # print(f'[Debug][handle_roi] detections : {detections}')
-        target_id = None
         if len(ids_in_roi) > 0:
             # ROI 안에 여러 명이 있다면, 가장 큰 bbox를 가진 사람을 선택
             target_id = max(ids_in_roi, key=lambda x: x['area'])['id']
@@ -915,46 +967,38 @@ class MW(QMainWindow):
 
             if target_id not in self.roi_enter_time: # 처음 들어온 사람이라면
                 self.roi_enter_time[target_id] = now
-
             self.id_last_seen[target_id] = now
-        
-        # if self.current_view_mode == 'video':
             if target_id is not None:
                 stay = now - self.roi_enter_time[target_id]
                 if stay >= self.roi_threshold_sec:
                     self.active_user_id = target_id
-        #             self.current_view_mode = 'webcam'
-        #             print('Switch to webcam mode!')
         
-         
-                    
-        # if self.current_view_mode == 'webcam':
+        # active_user_id가 있는지 체크(target) ----
         if self.active_user_id is not None: # active_user_id이 존재한다면
             # print(f'[Debug][handle_roi] ids_in_roi {ids_in_roi}')
+            # ids_in_roi : id, area, bbox 묶음을 리스트로
+            # ids_in_roi_ids : id 만 추출해서 리스트
             ids_in_roi_ids = [x['id'] for x in ids_in_roi]
             # print(f'[Debug][handle_roi] ids_in_roi_ids {ids_in_roi_ids}')
             if self.active_user_id not in ids_in_roi_ids: # active_user_id이 roi 안에 있는지 확인 (없는경우, 탈주)
                 check_time = now - self.id_last_seen[self.active_user_id] # 탈주
-                print(f'[Debug][handle_roi] User {self.active_user_id} lost for {check_time} seconds!]')
                 if check_time >= self.lost_threshold_sec:
+                    print(f'[Debug][handle_roi] User {self.active_user_id} lost for {check_time} seconds!]')
                     if ids_in_roi_ids: # 다른 사람이 roi에 들어온 경우, active_user_id 초기화
-                        new_active_id = max(ids_in_roi, key=lambda x: x['area'])['id']
+                        new_active_id = max(ids_in_roi, key=lambda x: x['area'])['id'] # target_id 랑 같을수도???
                         stay = now - self.roi_enter_time.get(new_active_id, now)
                         print(f'[Debug][handle_roi] 새로운사람 등장 id : {new_active_id}')
                         print(f'[Debug][handle_roi] stay : {stay}')
-                        if stay >= self.new_user_threshold_sec:
+                        if stay >= self.new_user_threshold_sec: # 2초이상 머물고 있다면 이사람이다!
                             self.active_user_id = new_active_id # active_user_id 변경
+                            self.countdown = None
+                            # self.countdown_off =False # 지워야할 수 도있음
+                            self.experience_start_check = 0 # 초기화
                             # self.current_view_mode = 'webcam'
                             print('Active user left, but another person is in the ROI. Switching to new active user!')
                             print(f'New active user ID: {self.active_user_id}')
                     else:       
                         # roi내 사람이 안들어왔네    
-                        # print('Switch to video mode!')
-                        # self.current_view_mode = 'video' # -> 체험 초기화로 수정 예정
-                        # self.roi_enter_time.pop(self.active_user_id, None)
-                        # self.id_last_seen.pop(self.active_user_id, None)
-                        # self.active_user_id = None
-                        # # 추후에 countdown 기능 추가 예정
                         self.countdown_fun(check_time, 10) # 10초동안 
                         if self.experience_start_check == 0:
                             print('User lost. Reset experience mode')
@@ -988,39 +1032,76 @@ class MW(QMainWindow):
     def update_scoretable(self, stage_result, row:int):
         if stage_result is None:
             return
-        self.widget_scoretable.setItem(row, 0, QTableWidgetItem(str(row+1)))
-        self.widget_scoretable.setItem(row, 1, QTableWidgetItem(stage_result.action_name))
-        # 정확도 = conf_mean
-        self.widget_scoretable.setItem(row, 2, QTableWidgetItem(f'{stage_result.conf_mean:.1f}%'))
-        # 안정성 = detect_ratio
-        self.widget_scoretable.setItem(row, 3, QTableWidgetItem(f'{stage_result.detect_ratio:.1f}%'))
-        # 평균 = total_score
-        item_score = QTableWidgetItem(f'{stage_result.total_score:.1f}%')
+        # index + 동작명
+        q_index = QTableWidgetItem(str(row+1))
+        q_index.setTextAlignment(Qt.AlignCenter)
+        result_name = QTableWidgetItem( stage_result.action_name)
+        result_name.setTextAlignment(Qt.AlignCenter)
+        self.widget_scoretable.setItem(row, 0, q_index)
+        self.widget_scoretable.setItem(row, 1, result_name)
+        
+        # 정확도 = conf_mean, 평균값
+        result_conf = QTableWidgetItem(f'{stage_result.conf_mean:.1f}')
+        result_conf.setTextAlignment(Qt.AlignCenter)
+        self.widget_scoretable.setItem(row, 2, result_conf)
+        
+        # 안정성 = detect_ratio, 쓰레쓰홀드 이상의 프레임 갯수비율
+        result_ratio = QTableWidgetItem(f'{stage_result.detect_ratio:.1f}')
+        result_ratio.setTextAlignment(Qt.AlignCenter)
+        self.widget_scoretable.setItem(row, 3, result_ratio)
+        
+        # 평균 = total_score, = 안정성 *0.35 + 평균*0.5 + 맥스값*0.15 
+        item_score = QTableWidgetItem(f'{stage_result.total_score:.1f}')
         item_score.setTextAlignment(Qt.AlignCenter)
         self.widget_scoretable.setItem(row, 4, item_score)
         
         print(f'[Debug][update_scoretable] row: {row}, 업데이트: {stage_result.action_name} -> {stage_result.total_score:.1f}점]')
     
-    # def _get_current_rank(self, socre:float) -> int:
-    #     rank = 1
-    #     for row in range(self.widget_rank.rowCount):
-    #         item = self.widget_rank.item(row,1)
-    #         if item and item.text():
-    #             try:
-    #                 existing = float(item.text())
-    #                 if existing > score:
-    #                     rank += 1
-    #                 pass
-    #             except ValueError:
-    #                 pass
-    #     return rank
             
     def update_rank_table(self):
         
-        total_score = self.exp_evaluator.get_total_score()
+        # score table에 있는 값을 여기서 직접 최종 마무리짓고 rank table에 넣기
+        # score table에 최종 행 넣기########################
+        accu_score1 = self.widget_scoretable.item(0, 2)
+        accu_score1 = float(accu_score1.text())
+        accu_score2 = self.widget_scoretable.item(1, 2)
+        accu_score2 = float(accu_score2.text())
+        accu_score3 = self.widget_scoretable.item(2, 2)
+        accu_score3 = float(accu_score3.text())
+
+        accu_final = QTableWidgetItem(f'{(accu_score1+accu_score2+accu_score3)/3:.1f}')
+        accu_final.setTextAlignment(Qt.AlignCenter)
         
+        safe_score1 = self.widget_scoretable.item(0, 3)
+        safe_score1 = float(safe_score1.text())
+        safe_score2 = self.widget_scoretable.item(1, 3)
+        safe_score2 = float(safe_score2.text())
+        safe_score3 = self.widget_scoretable.item(2, 3)
+        safe_score3 = float(safe_score3.text())
+        
+        safe_final = QTableWidgetItem(f'{(safe_score1+safe_score2+safe_score3)/3:.1f}')
+        safe_final.setTextAlignment(Qt.AlignCenter)
+        
+        total_score1 = self.widget_scoretable.item(0, 4)
+        total_score1 = float(total_score1.text())
+        total_score2 = self.widget_scoretable.item(1, 4)
+        total_score2 = float(total_score2.text())
+        total_score3 = self.widget_scoretable.item(2, 4)
+        total_score3 = float(total_score3.text())
+        
+        total_final = QTableWidgetItem(f'{(total_score1+total_score2+total_score3)/3:.1f}')        
+        total_final.setTextAlignment(Qt.AlignCenter)
+        
+        result_name = QTableWidgetItem('최종')
+        result_name.setTextAlignment(Qt.AlignCenter)
+        
+        self.widget_scoretable.setItem(3, 1, result_name)
+        self.widget_scoretable.setItem(3, 2, accu_final)
+        self.widget_scoretable.setItem(3, 3, safe_final)
+        self.widget_scoretable.setItem(3, 4, total_final)
+        
+        # score table 내용을 rank table에 업데이트하기#########        
         scores = []
-        
         for row in range(self.widget_rank.rowCount()):
             item = self.widget_rank.item(row, 1)
             if item and item.text():
@@ -1028,65 +1109,85 @@ class MW(QMainWindow):
                     scores.append(float(item.text()))
                 except ValueError:
                     pass
-            
-        scores.append(total_score)
+        total_final = float(total_final.text())
+        
+        scores.append(total_final)
         scores.sort(reverse=True)
         
-        new_row_idx = None # 현재 점수 랭크
-        for i in range(len(scores)-1, -1, -1):
-            if scores[idx] == total_score:
+        # new_row_idx = None # 현재 점수 랭크
+        # for idx in range(len(scores)-1, -1, -1):
+        #     if scores[idx] == total_final:
+        #         new_row_idx = idx
+        #         break
+        for idx in range(len(scores)):
+            if scores[idx] == total_final:
                 new_row_idx = idx
                 break
-                
-        self.widget_rank.setSortingEnabled(False)
-        
-        for idx, score in enumerate(scores):
-            is_new = (idx == new_row_idx)
-            item = self.widget_rank.item(row, 1)
-                
-            # 순위
-            rank_item = QTableWidgetItem(str(idx + 1))
-            rank_item.setTextAlignment(Qt.Aligncenter)
-            
-            # 점수
-            score_itme = QTableWidgetItem(f'{score:.1f}')
-            score_item.setTextAlignment(Qt.AlignCenter)
-            
-            if is_new:
-                for item in (rank_item, score_time):
-                    item.setBackground(self.COLOR_NEW_BG)
-                    item.setForeground(self.COLOR_NEW_TEXT)
-            else:
-                bg = self.COLOR_ODD_BG if idx % 2 == 0 else self.COLOR_EVEN_BG
-                for item in (rank_item, score_time):
-                    item.setBackground(bg)
-                    
-            self.widget_rank.setItem(idx, 0, rank_item)
-            self.widget_rank.setItem(idx, 1, score_item)
-            
-        for idx in range(len(scores), self.widget_rank.rowCount()):
-            self.widget_rank.setItem(idx, 0, QTableWidgetItem(""))
-            self.widget_rank.setItem(idx, 1, QTableWidgetItem(""))
-            
-        if new_row_idx is not None:
-            self.widget_rank.scrollToItem(self.widget_rank.item(new_row_idx, 0))
-            
-        rank_display = (new_row_idx + 1) if new_row_idx is not None else len(scores)
-        
-            
-        # rank_display = self._get_current_rank(total_score)
-        self.widget_scoretext.setItem(f'축하합니다! 성공하셨습니다!\
-                                      \n총점 : {total_score:1.f}점 | 현재 {rank_display}위 입니다.')
 
-        print(f'[Debug][update_rank_table] 랭킹 테이블 업데이트, {rank_display}위,  점수: {total_score:.1f}]')
+        self.widget_rank.setSortingEnabled(False)
+        self.widget_rank.insertRow(new_row_idx)
+
+        # 이전 하이라이트 복구
+        if self._highlighted_rank_row is not None:
+            prev = self._highlighted_rank_row
+            actual_prev = prev if prev < new_row_idx else prev + 1
+            for col in range(self.widget_rank.columnCount()):
+                item = self.widget_rank.item(actual_prev, col)
+                if item:
+                    bg = self.COLOR_ODD_BG if actual_prev % 2 == 0 else self.COLOR_EVEN_BG
+                    item.setBackground(QColor(bg))
+                    item.setForeground(QColor(self.COLOR_TEXT)) 
+        
+        # 순위
+        rank_item = QTableWidgetItem(str(new_row_idx + 1))
+        rank_item.setTextAlignment(Qt.AlignCenter)
+            
+        # 점수
+        score_item = QTableWidgetItem(f'{total_final:.1f}')
+        score_item.setTextAlignment(Qt.AlignCenter)
+        
+        for item in (rank_item, score_item):
+            item.setTextAlignment(Qt.AlignCenter)
+            item.setBackground(QColor(self.COLOR_NEW_BG))
+            item.setForeground(QColor(self.COLOR_NEW_TEXT))
+        
+        self.widget_rank.setItem(new_row_idx, 0, rank_item)
+        self.widget_rank.setItem(new_row_idx, 1, score_item)
+
+        prev_score = None
+        prev_rank = 0
+        for row in range(self.widget_rank.rowCount()):
+            rank_item  = self.widget_rank.item(row, 0)
+            score_item = self.widget_rank.item(row, 1)
+            if score_item and score_item.text() and rank_item:
+                score = float(score_item.text())
+                if score != prev_score:
+                    prev_rank = row + 1
+                    prev_score = score
+                rank_item.setText(str(prev_rank))
+        
+        # for row in range(new_row_idx + 1, self.widget_rank.rowCount()):
+        #     old_rank = self.widget_rank.item(row, 0)
+        #     if old_rank and old_rank.text():
+        #         old_rank.setText(str(int(old_rank.text()) + 1))
+        
+        self._highlighted_rank_row = new_row_idx
+        
+        self.widget_rank.scrollToItem(self.widget_rank.item(new_row_idx, 0))
+        rank_display = new_row_idx +1
+        print(f'[Debug][update_rank_table] 현재 {rank_display}위입니다.')
+            
+        self.widget_scoretext.setText(f'축하합니다! 성공하셨습니다!\
+                                      \n총점 : {total_final:.1f}점 | 현재 {rank_display}위 입니다.')
+        self.rank = rank_display
+        print(f'[Debug][update_rank_table] 랭킹 테이블 업데이트, {rank_display}위,  점수: {total_final:.1f}]')
         
     @Slot(dict)
     def update_controller(self, result_dict):
         
-        frame = result_dict["frame"]
+        # frame = result_dict["frame"]
         detections = result_dict["detections"]
-        human_exists = result_dict["human_exists"]
-        action_results = result_dict.get("action_results", {})
+        # action_results = result_dict.get("action_results", {})
         keypoints_dict = result_dict.get("keypoints", {})
         
         self.handle_roi(detections)
@@ -1123,149 +1224,203 @@ class MW(QMainWindow):
         
 
         if self.active_user_id:
-            print(f'[Debug][update_controller] active user id: {self.active_user_id}, human time: {self.human_time}')
+            # print(f'[Debug][update_controller] active user id: {self.active_user_id}, human time: {self.human_time}')
                           
             
             if self.current_view_mode == 'webcam':
                 self.mode_1()
-                if self.audio.play_sound("hello.mp3"):
-                    # print("음성 출력 성공")
+                if self.audio.play_sound("res/Sound/hello.mp3"):
                     print('[Debug][update_controller] hello.mp3 음성 출력 완료')
                 self.current_view_mode = 'mode2_1'
                     
                     
-                    # self.current_view_mode = 'mode2'
             elif self.current_view_mode == 'mode2_1':
-                if self.audio.play_check() == 'hello.mp3':
-                    self.audio.play_sound('action_1.mp3')
-                    print('[Debug][update_controller_1] try to play action_1.mp3]')
-                    if self.audio.play_check() == 'action_1.mp3':
-                        self.mode_2_1()
-                        print('[Debug][update_controller_1] action_1.mp3 음성 출력 완료')
-                    # print("음성 출력 성공")
-                    # self.mode_2_1()
-                elif self.audio.play_check() == 'action_1.mp3':
-                    self.audio.update()
-                    print(f'[Debug][update_controller_2] {self.audio.play_check()}')
-                elif self.audio.play_check() == None:
-                    self.countdown_fun(10,3)
-                    print(f'[Debug][update_controller_3] count_down?')
-                    if self.countdown_off:
-                        self.countdown = None
-                        self.audio.play_sound('10seconds.mp3')
-                elif self.audio.play_check() == '10seconds.mp3':
+                if self.stage == 0:
+                    if self.audio.get_current() == 'hello.mp3':
+                        # print(f'[Debug][update_controller_0] {self.audio.get_current()}')
+                        pass
+                        
+                    elif self.audio.get_current() == None:
+                        self.audio.play_sound('res/Sound/action_1.mp3')
+                        print('[Debug][update_controller_1] try to play action_1.mp3]')
+                        print(f'[Debug][update_controller_1] audio current: {self.audio.get_current()}]')
+                        if self.audio.get_current() == 'res/Sound/action_1.mp3': # 당연한 조건이라서 지울 예정
+                            self.mode_2_1()
+                            self.stage = 1 # 액션음악플레이중
+                            print('[Debug][update_controller_1] action_1.mp3 음성 출력 완료')
+                elif self.stage == 1:
+                    if self.audio.get_current() == 'res/Sound/action_1.mp3':
+                        # print(f'[Debug][update_controller_2] {self.audio.get_current()}')
+                        pass
+                    elif self.audio.get_current() == None:
+                        # self.countdown_fun(10,1)
+                        self.countdown_fun(10,3)
+                        # print(f'[Debug][update_controller_3] count_down?')
+                        if self.countdown_off:
+                            self.countdown = None
+                            self.stage = 2 # 동작카운트
+                elif self.stage == 2: # 동작인식모드
+                    # self.countdown_fun(10,1)
                     self.countdown_fun(10,5)
+                    self.action_flag = 1
                     self.action_recogniton = True
                     if self.action_recogniton:
+                        
+                        """
                         if self._eval_stage != 0:
                             self._eval_stage = 0
                             self.exp_evaluator.start_stage(0)
+                        """ 
+                            
                         action_results = result_dict.get("action_results", {}).get(self.active_user_id, [])
-                        self.exp_evaluator.add_frame(action_results, keypoints=None)
-                    print(f'[Debug][update_controller_4] do it !!!')
+                        ksp = result_dict.get("keypoints_scores_pair")
+                        keypoints_dict = ksp[0] if ksp is not None else None
+                        # keypoints_dict = result_dict.get("keypoints_scores_pair").get(self.active_user_id, [])[0] # id가 체험자가 맞는지 지금은 모르는 상태
+                        self.exp_evaluator.add_frame(self.action_flag, action_results, keypoints=keypoints_dict)
+                    # print(f'[Debug][update_controller_4] do it !!!')
                     if self.countdown_off:
+                        
+                        stage_result = self.exp_evaluator.end_stage(self.action_flag)
+                        self.update_scoretable(stage_result, row = 0)
+                        
+                        """
                         if self._eval_stage == 0:
                             stage_result = self.exp_evaluator.end_stage()
                             self._eval_stage = -1
                             self.update_scoretable(stage_result, row = 0)
-                            
+                        """
+                         
                         self.current_view_mode = 'mode2_2'
-                        self.countdown_off = False
+                        self.stage = 0
+                        # self.countdown_off = False
                         self.countdown = None
-                        # self.human_time = 0
                         self.action_recogniton = False
-                        # text = "2단계. 붐 올리기. 동작을 취해보세요"
-                        # tts = gTTS(text=text, lang='ko')
-                        # tts.save("action_2.mp3")
-                        print(f'[Debug][update_controller] {self.audio.play_check()}')
-                        self.audio.play_sound("action_2.mp3")
+                        self.audio.play_sound("res/Sound/action_2.mp3")
+                        self.action_flag = 2
                         self.mode_2_2()
                         print(f'[Debug][update_controller_5] mode change to {self.current_view_mode}')
                         print('[Debug][update_controller_5] action_2.mp3 음성 출력 완료')
             
             elif self.current_view_mode == 'mode2_2':
-                if self.audio.play_check() == 'action_2.mp3':
-                    self.audio.update()
-                    print(f'[Debug][update_controller_6] {self.audio.play_check()}')
-                elif self.audio.play_check() == None:
-                    self.countdown_fun(10,3)
-                    print(f'[Debug][update_controller_7] count_down?')
-                    if self.countdown_off:
-                        self.audio.play_sound('10seconds.mp3')
-                        self.countdown = None
-                        print(f'[Debug][update_controller_8] {self.audio.play_check()}')
-                elif self.audio.play_check() == '10seconds.mp3':
+                if self.stage == 0:
+                    if self.audio.get_current() == 'res/Sound/action_2.mp3':
+                        # print(f'[Debug][update_controller_6] {self.audio.get_current()}')
+                        pass
+                    elif self.audio.get_current() == None:
+                        # self.countdown_fun(10,1)
+                        self.countdown_fun(10,3)
+                        # print(f'[Debug][update_controller_7] count_down?')
+                        if self.countdown_off:
+                            self.countdown = None
+                            # print(f'[Debug][update_controller_8] {self.audio.get_current()}')
+                            self.stage=2
+                elif self.stage == 2:
+                    # self.countdown_fun(10, 1)
                     self.countdown_fun(10, 5)
                     self.action_recogniton = True
                     
+                    """
                     if self.action_recogniton:
                         if self._eval_stage != 0:
                             self._eval_stage = 0
-                            self.exp_evaluator.start_stage(0)
-                        action_results = result_dict.get("action_results", {}).get(self.active_user_id, [])
-                        self.exp_evaluator.add_frame(action_results, keypoints=None)
-                        print(f'[Debug][update_controller_9] do it !!!')
+                            self.exp_evaluator.start_stage(1)
+                    """
+                         
+                    action_results = result_dict.get("action_results", {}).get(self.active_user_id, [])
+                    ksp = result_dict.get("keypoints_scores_pair")
+                    keypoints_dict = ksp[0] if ksp is not None else None
+                    # keypoints_dict = result_dict.get("keypoints_scores_pair").get(self.active_user_id, [])[0]
+                    self.exp_evaluator.add_frame(self.action_flag, action_results, keypoints=keypoints_dict)
+                    # print(f'[Debug][update_controller_9] do it !!!')
                     
                     if self.countdown_off:
                         
+                        stage_result = self.exp_evaluator.end_stage(self.action_flag)
+                        self.update_scoretable(stage_result, row = 1)
+                        
+                        """
                         if self._eval_stage == 0:
                             stage_result = self.exp_evaluator.end_stage()
                             self._eval_stage = -1
-                            self.update_scoretable(stage_result, row = 0)
-                            
-                        self.countdown = None
+                            self.update_scoretable(stage_result, row = 1)
+                        """
+                         
                         self.current_view_mode = 'mode2_3'
-                        self.countdown_off = False
+                        self.stage = 0
+                        # self.countdown_off = False
+                        self.countdown = None
                         self.action_recogniton = False
-                        # text = "3단계. 비상정지. 동작을 취해보세요"
-                        # tts = gTTS(text=text, lang='ko')
-                        # tts.save("action_3.mp3")
-                        self.audio.play_sound("action_3.mp3")
+                        self.audio.play_sound("res/Sound/action_3.mp3")
+                        self.action_flag = 3
                         self.mode_2_3()
+                        
+                        
                         print(f'[Debug][update_controller_10] mode change to {self.current_view_mode}')
                         print('[Debug][update_controller_10] action_3.mp3 음성 출력 완료')
                         
             elif self.current_view_mode == 'mode2_3':
-                if self.audio.play_check() == 'action_3.mp3':
-                    self.audio.update()
-                    print(f'[Debug][update_controller_11] {self.audio.play_check()}')
-                elif self.audio.play_check() == None:
-                    self.countdown_fun(10, 3)
-                    print(f'[Debug][update_controller_12] count_down?')
-                    if self.countdown_off:
-                        self.countdown = None
-                        self.audio.play_sound('10seconds.mp3')
-                        print(f'[Debug][update_controller_13] {self.audio.play_check()}')
-                elif self.audio.play_check() == '10seconds.mp3':
+                if self.stage == 0:
+                    if self.audio.get_current() == 'res/Sound/action_3.mp3':
+                        # print(f'[Debug][update_controller_11] {self.audio.get_current()}')
+                        pass
+                    elif self.audio.get_current() == None:
+                        # self.countdown_fun(10, 1)
+                        self.countdown_fun(10, 3)
+                        # print(f'[Debug][update_controller_12] count_down?')
+                        if self.countdown_off:
+                            self.countdown = None
+                            self.stage=2
+                            # print(f'[Debug][update_controller_13] {self.audio.get_current()}')
+                elif self.stage == 2:
+                    # self.countdown_fun(10, 1)
                     self.countdown_fun(10, 5)
                     self.action_recogniton = True
                     
+                    """
                     if self.action_recogniton:
                         if self._eval_stage != 0:
                             self._eval_stage = 0
-                            self.exp_evaluator.start_stage(0)
-                        action_results = result_dict.get("action_results", {}).get(self.active_user_id, [])
-                        self.exp_evaluator.add_frame(action_results, keypoints=None)
+                            self.exp_evaluator.start_stage(2)
+                    """
+                         
+                    action_results = result_dict.get("action_results", {}).get(self.active_user_id, [])
+                    ksp = result_dict.get("keypoints_scores_pair")
+                    keypoints_dict = ksp[0] if ksp is not None else None
+                    # keypoints_dict = result_dict.get("keypoints_scores_pair").get(self.active_user_id, [])[0]
+                    self.exp_evaluator.add_frame(self.action_flag, action_results, keypoints=keypoints_dict)
+                    # print(f'[Debug][update_controller_14] do it !!!')
                     
                     if self.countdown_off:
                         
+                        stage_result = self.exp_evaluator.end_stage(self.action_flag)
+                        self.update_scoretable(stage_result, row = 2)
+                        
+                        """
                         if self._eval_stage == 0:
                             stage_result = self.exp_evaluator.end_stage()
                             self._eval_stage = -1
-                            self.update_scoretable(stage_result, row = 0)
-                            
-                    
-                        print(f'[Debug][update_controller_14] do it !!!')
+                            self.update_scoretable(stage_result, row = 2)
+                        """
+                         
                         self.current_view_mode = 'mode_3'
-                        self.countdown_off = False
-                        self.action_recogniton = False
+                        self.stage=1
+                        # self.countdown_off = False
                         self.countdown = None
+                        self.action_recogniton = False
+                        self.action_flag = 0
                         self.mode_3()
+                        
                         print(f'[Debug][update_controller_15] mode change to {self.current_view_mode}')
-                        print('[Debug][update_controller_15] action_4.mp3 음성 출력 완료')
-            
+                        print('[Debug][update_controller_15] 음성 더이상 없음')
+        
             elif self.current_view_mode == 'mode_3':
-                print('평가모듈 실행중!!!!!!!!!!!')
+                if self.stage == 1:
+                    print('평가모듈 실행중!!!!!!!!!!!')
+                    self.update_rank_table()
+                    self.exp_evaluator.reset()
+                    print('[Debug][update_controller_16] score table updated')
+                    print('[Debug][update_controller_16] rank table updated')
+                    self.stage = 0
                 # 평가모듈을 실행하여 그 결과를 table에 넣고, rank table에도 자동으로 업데이트
                 
                 
@@ -1282,23 +1437,25 @@ class MW(QMainWindow):
                     # tts = gTTS(text=text, lang='ko')
                     # tts.save("hello.mp3")
                 
-                
-                
-        self.canvas.update_frame(frame, self.countdown)
+        if self.current_view_mode == 'webcam':
+            self.canvas.set_visualization_mode(show_bbox=True, show_pose=False, show_action=False)
+            
+        elif self.current_view_mode in ('mode2_1', 'mode2_2', 'mode2_3', 'mode_3'):
+            self.canvas.set_visualization_mode(show_bbox=True, show_pose=True, show_action=False)
+            
+        if self.action_recogniton:
+            self.canvas.set_visualization_mode(show_bbox=True, show_pose=True, show_action=True)
+        
+        result_dict['current_view_mode']=self.current_view_mode
+        
+        # self.canvas.update_frame(frame, self.countdown)
+        self.canvas.update_frame(result_dict, self.countdown)
             
         view_mode = { 'mode' : self.current_view_mode , 'action_recognition' : self.action_recogniton}
         
         self.signalviewinfo.emit(view_mode)
         
-        # if self.current_view_mode == 'webcam':
-        #     self.show_webcam_mode()
-        #     # print(f'[Debug][Main] current_view_mode: {self.current_view_mode}')
-        #     # self.canvas.update_frame(frame, detections, self.roi, self.active_user_id, webcam_mode=True)
-        # elif self.current_view_mode == 'video':
-        #     self.show_video_mode()
-            # print(f'[Debug][Main] current_view_mode: {self.current_view_mode}')
-        # elif self.current_view_mode == 
-        
+       
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
