@@ -382,14 +382,14 @@ class ExperienceEvaluator:
         """
         # if self._current_stage < 0:
         #     return
-        self._evaluators[action_flag-1].add_frame(scores_array, keypoints)
+        self._evaluators[action_flag].add_frame(scores_array, keypoints)
 
     def end_stage(self, action_flag : int) -> Optional[EvalResult]:
         """구간 종료 → 분석 → EvalResult 반환"""
         # if self._current_stage < 0:
         #     return None
-        result = self._evaluators[action_flag-1].analyze()
-        self._results[action_flag-1] = result
+        result = self._evaluators[action_flag].analyze()
+        self._results[action_flag] = result
         # self._results[self._current_stage] = result
         # self._current_stage = -1
         return result

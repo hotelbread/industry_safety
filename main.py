@@ -1276,11 +1276,11 @@ class MW(QMainWindow):
                         ksp = result_dict.get("keypoints_scores_pair")
                         keypoints_dict = ksp[0] if ksp is not None else None
                         # keypoints_dict = result_dict.get("keypoints_scores_pair").get(self.active_user_id, [])[0] # id가 체험자가 맞는지 지금은 모르는 상태
-                        self.exp_evaluator.add_frame(self.action_flag, action_results, keypoints=keypoints_dict)
+                        self.exp_evaluator.add_frame(self.STAGE_CLASS_IDXS[self.action_flag-1], action_results, keypoints=keypoints_dict)
                     # print(f'[Debug][update_controller_4] do it !!!')
                     if self.countdown_off:
                         
-                        stage_result = self.exp_evaluator.end_stage(self.action_flag)
+                        stage_result = self.exp_evaluator.end_stage(self.STAGE_CLASS_IDXS[self.action_flag-1])
                         self.update_scoretable(stage_result, row = 0)
                         
                         """
@@ -1330,12 +1330,12 @@ class MW(QMainWindow):
                     ksp = result_dict.get("keypoints_scores_pair")
                     keypoints_dict = ksp[0] if ksp is not None else None
                     # keypoints_dict = result_dict.get("keypoints_scores_pair").get(self.active_user_id, [])[0]
-                    self.exp_evaluator.add_frame(self.action_flag, action_results, keypoints=keypoints_dict)
+                    self.exp_evaluator.add_frame(self.STAGE_CLASS_IDXS[self.action_flag-1], action_results, keypoints=keypoints_dict)
                     # print(f'[Debug][update_controller_9] do it !!!')
                     
                     if self.countdown_off:
                         
-                        stage_result = self.exp_evaluator.end_stage(self.action_flag)
+                        stage_result = self.exp_evaluator.end_stage(self.STAGE_CLASS_IDXS[self.action_flag-1])
                         self.update_scoretable(stage_result, row = 1)
                         
                         """
@@ -1387,12 +1387,12 @@ class MW(QMainWindow):
                     ksp = result_dict.get("keypoints_scores_pair")
                     keypoints_dict = ksp[0] if ksp is not None else None
                     # keypoints_dict = result_dict.get("keypoints_scores_pair").get(self.active_user_id, [])[0]
-                    self.exp_evaluator.add_frame(self.action_flag, action_results, keypoints=keypoints_dict)
+                    self.exp_evaluator.add_frame(self.STAGE_CLASS_IDXS[self.action_flag-1], action_results, keypoints=keypoints_dict)
                     # print(f'[Debug][update_controller_14] do it !!!')
                     
                     if self.countdown_off:
                         
-                        stage_result = self.exp_evaluator.end_stage(self.action_flag)
+                        stage_result = self.exp_evaluator.end_stage(self.STAGE_CLASS_IDXS[self.action_flag-1])
                         self.update_scoretable(stage_result, row = 2)
                         
                         """
