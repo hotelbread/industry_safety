@@ -46,7 +46,7 @@ class AiThread(QThread):
         self.RESOURCE_DIR = RESOURCE_DIR
 
         # print()
-        print('=================================================')
+        print('==============================================inference_topdown===')
         
         # Resource relative path
         # self.RESOURCE_DIR = get_resource_dir()
@@ -67,8 +67,14 @@ class AiThread(QThread):
         
         # 카메라(webcam)
         self.cap = cv2.VideoCapture(0)
+        # self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+        # self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
         self.frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+        self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'))
         self.frame_rate = self.cap.get(cv2.CAP_PROP_FPS)
         self.parent.log(f'[Thread][AI] Camera (webcam) : {self.frame_width}x{self.frame_height} @ {self.frame_rate:.2f} FPS')
         self.frame_loader = self.cap
@@ -88,12 +94,22 @@ class AiThread(QThread):
 
         # taewon
         self.frame_drop = 0
+        self.frame_count = 0
         self.current_view_mode = 'webcam'
-        
+        self.pose_skip_count = 0
+        self.last_result_dict = {}
+        self.ai_action_interval = 1.0/10.0
+        self.last_action_time = 0.0
+        self.pose_append_interval = 1.0/30.0  # 30 FPS
+        # self.roi_points = [(1,1),(1,480),(639, 480),(639, 1)]
+        self.roi_points = [(1,1),(1,719),(1285, 719),(1285, 1)]
+
+
         # -------------------
         # action
         # self.window_size = 32
-        self.window_size = 48
+        # self.window_size = 48
+        self.window_size = 31
         # self.window_size = 64
         # self.window_size = 100
         self.action_thr = 0.1
@@ -108,6 +124,8 @@ class AiThread(QThread):
         # self.line_width = self.frame_loader.line_width
         # self.circle_radius = self.frame_loader.circle_radius
 
+        self.pose_append_timer = Duration('[AI][Pose Append]')
+        self.loop_timer = Duration('[AI][Loop]')
         self.det_timer = Duration('[AI][Detection]')
         self.pose_timer = Duration('[AI][Pose estimation]')
         self.multi_pose_timer = Duration('[AI][Multi-Person Pose estimation]')
@@ -152,12 +170,20 @@ class AiThread(QThread):
         # -------------------
 
     def run(self):
+        
+        # loop start
+
         pose_results = dict()
+        keypoints_per_id      = {}
+
         # while self._running:
         while self.cap.isOpened() and self._running:
             try:
                 # cam에서 이미지 가져오기
+                self.loop_timer.set_prev()
                 ret, frame = self.frame_loader.read()
+
+                
                 if not ret:
                     print('Failed to capture frame from camera.')
                     if self.frame_drop > 30:
@@ -167,6 +193,7 @@ class AiThread(QThread):
                     self.frame_drop += 1
                     print(f'frame drop 발생 : {self.frame_drop}')
                     self.cap = cv2.VideoCapture(0)
+                    self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'))
                     continue
                 self.frame_drop = 0
                 # frame = self.frame_loader.get_frame()
@@ -179,12 +206,12 @@ class AiThread(QThread):
 
                 h, w, _ = rgb_img.shape
 
-                self.det_timer.set_prev()
+                # self.det_timer.set_prev()
 
                 det_result = inference_detector(self.person_detector.detector, frame)
                 
-                self.det_timer.calc_elapsed()
-                self.det_duration.append(self.det_timer.get_elapsed())
+                # self.det_timer.calc_elapsed()
+                # self.det_duration.append(self.det_timer.get_elapsed())
                 # self.det_timer.print_fps()
                 # self.det_timer.print_sec()
                 # print()
@@ -194,18 +221,19 @@ class AiThread(QThread):
                 output_bboxes = pred_instance.bboxes # (N, 4)
                 output_labels = pred_instance.labels # (N,)
                 output_scores = pred_instance.scores # (N,)
-                
                 person_idx_lst = np.logical_and(output_labels == self.det_cat_id,
                                                 output_scores > self.bbox_thr)
-                if not True in person_idx_lst:
+                if not person_idx_lst.any():
                     result_dict = {
                         "frame_raw"            : np.ascontiguousarray(rgb_img),
                         "detections"           : np.empty((0, 7), dtype=np.float32),
                         "human_exists"         : False,
                         "action_results"       : {},
                         "keypoints_scores_pair": None,
+                        "keypoints"            : {},
                     }
                     self.signalSetImage.emit(result_dict)
+                    print(f'[Debug][AI-thread]no man!! : {result_dict["keypoints_scores_pair"]}')
                     continue
 
                 people_bboxes = output_bboxes[person_idx_lst] # (M, 4)
@@ -224,7 +252,6 @@ class AiThread(QThread):
 
                 bboxes_info = pose_bboxes[nms(pose_bboxes, self.nms_thr), :]
                 # pose_input_bbox = bboxes_info[:,:4]
-
                 # -------------------------------------------------------
                 # OC-SORT
                 tracked_bboxes = np.empty((0, 7), dtype=np.float32)  # 기본값
@@ -236,27 +263,64 @@ class AiThread(QThread):
                     print('[ERROR][AI] {0}'.format(traceback.format_exc()))
 
                 # -------------------------------------------------------
-
                 multi_pose_results = []
                 now_frame_id = []
-                keypoints_per_id      = {}
+                # keypoints_per_id      = {}
                 
                 self.multi_pose_timer.set_prev()
 
+                # # 2frame마다 pose estimation 수행 (조정 필요)
+                # self.frame_count += 1
+                # if self.frame_count % 2 != 0:
+                #     if hasattr(self, 'last_result_dict'):
+                #         # self.loop_timer.calc_elapsed()
+                #         # self.loop_timer.print_sec()
+                #         # self.loop_timer.print_fps()
+                        
+                #         self.last_result_dict['frame_raw'] = np.ascontiguousarray(rgb_img)
+
+                #         self.signalSetImage.emit(self.last_result_dict)
+                #     continue
+
+                # 경과시간으로 조정해보기
+                # self.ai_action_interval = 1.0/10.0
+                # self.last_action_time = 0.0
+                # if self.action_timer.get_elapsed() >= self.ai_action_interval:
+                #     continue
+                
+                roi_arr = np.array(self.roi_points, np.int32)
                 for single_bbox in tracked_bboxes:
+                    
+                    # roi 영역만 pose 돌리기
+                    x1, y1, x2, y2 = single_bbox[:4]
+                    cx = (x1 + x2) / 2
+                    cy = y2  # 발끝 기준
+                    # ROI 안에 있는 사람만 Pose 처리
+                    if cv2.pointPolygonTest(roi_arr, (cx, cy), False) < 0:
+                        continue
+                    
                     identification = single_bbox[4]
                     now_frame_id.append(identification)
                     if not identification in pose_results.keys():
                         pose_results[identification] = []
 
+                    
+                    # ── Pose 실행 전에 체크 ──────────────────────
+                    if self.pose_append_timer.get_elapsed_now() < self.pose_append_interval:
+                        # print(f'[Debug][AI] pose append skipped (elapsed : {self.pose_append_timer.get_elapsed_now():.3f} sec)')
+                        continue  # Pose inference 자체를 스킵
+                    self.pose_append_timer.set_prev()
+                    # ─────────────────────────────────────────────
+
                     # original (coco 17key)
                     # id = np.expand_dims(np.array([identification]*17), 0)
                     # id = np.expand_dims(id, 2)
                     # for whole body
-                    id = np.expand_dims(np.array([identification]*133), 0)
-                    id = np.expand_dims(id, 2)
+                    idx = np.expand_dims(np.array([identification]*133), 0)
+                    idx = np.expand_dims(idx, 2)
 
                     self.pose_timer.set_prev()
+                    
 
                     single_pose_result = inference_topdown(self.pose_estimator.pose_estimator,
                                                            rgb_img,
@@ -268,38 +332,7 @@ class AiThread(QThread):
                     # self.pose_timer.print_sec()
                     # print()
 
-                    # print()
-                    # print('single_pose_result (type) :', type(single_pose_result))
-                    # print('single_pose_result (len) :', len(single_pose_result))
-                    # print()
-                    # print()
-                    # print('single_pose_result[0] (type) :', type(single_pose_result[0]))
-                    # print('single_pose_result[0] (keys) :', single_pose_result[0].keys())
-                    # print()
-                    # print()
-                    # print('single_pose_result[0][pred_instances] (type) :', type(single_pose_result[0].get('pred_instances')))
-                    # print('single_pose_result[0][pred_instances] (keys) :', single_pose_result[0].get('pred_instances').keys())
-                    # print()
-                    # print('---------------------------------------------------------------------')
-                    # print()
-                    # print('single_pose_result[0][pred_instances][\'keypoints_visible\'] (type) :', type(single_pose_result[0].get('pred_instances')["keypoints_visible"]))
-                    # print('single_pose_result[0][pred_instances][\'keypoints_visible\'] (shape) :', single_pose_result[0].get('pred_instances')["keypoints_visible"].shape)
-                    # print()
-                    # print('single_pose_result[0][pred_instances][\'keypoints\'] (type) :', type(single_pose_result[0].get('pred_instances')["keypoints"]))
-                    # print('single_pose_result[0][pred_instances][\'keypoints\'] (shape) :', single_pose_result[0].get('pred_instances')["keypoints"].shape)
-                    # print()
-                    # print('single_pose_result[0][pred_instances][\'keypoint_scores\'] (type) :', type(single_pose_result[0].get('pred_instances')["keypoint_scores"]))
-                    # print('single_pose_result[0][pred_instances][\'keypoint_scores\'] (shape) :', single_pose_result[0].get('pred_instances')["keypoint_scores"].shape)
-                    # print()
-                    # print('single_pose_result[0][pred_instances][\'bboxes\'] (type) :', type(single_pose_result[0].get('pred_instances')["bboxes"]))
-                    # print('single_pose_result[0][pred_instances][\'bboxes\'] (shape) :', single_pose_result[0].get('pred_instances')["bboxes"].shape)
-                    # print()
-                    # print('single_pose_result[0][pred_instances][\'bbox_scores\'] (type) :', type(single_pose_result[0].get('pred_instances')["bbox_scores"]))
-                    # print('single_pose_result[0][pred_instances][\'bbox_scores\'] (shape) :', single_pose_result[0].get('pred_instances')["bbox_scores"].shape)
-                    # print()
-                    # print()
-                    # print()
-
+      
                     pose_result = {
                         'bboxes': single_pose_result[0].get("pred_instances").get('bboxes'),
                         'bbox_scores': single_pose_result[0].get("pred_instances").get('bbox_scores'),
@@ -311,7 +344,6 @@ class AiThread(QThread):
                         'keypoints': single_pose_result[0].get("pred_instances").get('keypoints')[:,:17,:],
                         'keypoint_scores': single_pose_result[0].get("pred_instances").get('keypoint_scores')[:,:17]
                     }
-
                     pose_results[identification].append(pose_result)
 
                     # (1, 17, 2)
@@ -323,7 +355,7 @@ class AiThread(QThread):
                     # (1, 17, 3)
                     person_info = np.concatenate((person_keypoints, person_conf), axis=2)
                     # (1, 17, 4)
-                    person_info = np.concatenate((person_info, id), axis=2)
+                    person_info = np.concatenate((person_info, idx), axis=2)
 
                     # (17,4)
                     person_info = np.squeeze(person_info)
@@ -332,21 +364,30 @@ class AiThread(QThread):
                     # id별 키포인트 저장 (테스트)
                     person_keypoints_full = single_pose_result[0].get('pred_instances').get('keypoints') # shape : (1, 133, 2)
                     keypoints_per_id[int(identification)] = person_keypoints_full[0, :, :2] # (133,2)
-
+                
                 # (M, 17, 4)
+                # keypoints_info = np.array(multi_pose_results)
                 keypoints_info = np.array(multi_pose_results)
+                if keypoints_info.ndim != 3:
+                    self.last_result_dict['frame_raw'] = np.ascontiguousarray(rgb_img)
+                    self.last_result_dict['detections'] = np.empty((0, 7), dtype=np.float32)
+                    self.last_result_dict['keypoints_scores_pair'] = (np.empty((0, 17, 2)), np.empty((0, 17)))
+                    self.signalSetImage.emit(self.last_result_dict)
+                    continue
 
                 keypoints = keypoints_info[:,:,:2]
                 keypoints_scores = keypoints_info[:,:,2]
 
-                self.multi_pose_timer.calc_elapsed()
-                self.multi_pose_duration.append(self.multi_pose_timer.get_elapsed())
-
+                # self.multi_pose_timer.calc_elapsed()
+                # self.multi_pose_duration.append(self.multi_pose_timer.get_elapsed())
+                # self.multi_pose_timer.print_fps()
                 # -------------------------------------------------------
                 # Action
                 action_results_per_id = {}   # { int(id): [{class_idx, conf}, ...] }
                 # keypoints_per_id      = {}   # { int(id): ndarray (17, 2) }
                 # action_scores_np        = None
+                # self.action_timer.set_prev()
+                action_ran = False
                 for key, result_lst in pose_results.items():
                     if key in now_frame_id:
                         action_scores_np        = None # 수정
@@ -354,16 +395,20 @@ class AiThread(QThread):
                         if len(result_lst) >= self.window_size:
                             action_input = result_lst[-(self.window_size):]
 
-                            self.action_timer.set_prev()
+                            # self.action_timer.set_prev()
                             action_result = inference_skeleton(self.action_recognizer.action_recognizer, action_input, (h, w))
-                            self.action_timer.calc_elapsed()
-                            self.action_duration.append(self.action_timer.get_elapsed())
+                            # self.action_timer.calc_elapsed()
+                            # self.action_duration.append(self.action_timer.get_elapsed())
 
-                            
                             action_scores_np = action_result.pred_score.cpu().numpy()  # shape (num_classes,)
+                            
+                            action_ran = True
 
-                        action_results_per_id[int(key)] = action_scores_np # 추가
-                        
+                        action_results_per_id[int(key)] = action_scores_np # added      
+                # if action_ran:
+                #     self.action_timer.calc_elapsed()
+                #     self.action_timer.print_fps()
+                #     self.action_timer.print_sec()
                             # action_scores = action_result.pred_score
                             # while True:
                             #     max_pred_index = action_scores.argmax().item()
@@ -410,8 +455,13 @@ class AiThread(QThread):
                     "keypoints_scores_pair": (keypoints, keypoints_scores),  # (M,17,2), (M,17)
                     "keypoints"            : keypoints_per_id,               # {int: (17, 2)}
                 }
-                self.signalSetImage.emit(result_dict)
 
+                # self.loop_timer.calc_elapsed()
+                # self.loop_timer.print_fps()
+                # self.loop_timer.print_sec()
+
+                self.last_result_dict = result_dict
+                self.signalSetImage.emit(result_dict)
                 # fps = self.getFps()
                 # print()
                 # print('-----------------------------------------')
@@ -442,21 +492,21 @@ class AiThread(QThread):
                 continue
 
 
-    def getFps(self):
-        elapsed = perf_counter() - self.prevTime
-        if self.frame_loader.mode == 'webcam':
-            fps = 1/elapsed
-        else:
-            delay = max(0, self.frame_loader.delay_limit - elapsed)
-            sleep(delay)
-            print(f'delay : {delay:.5f}')
-            if delay == 0:
-                fps = 1/elapsed
-            else:
-                fps = self.frame_loader.video_fps
-        self.prevTime = perf_counter()
+    # def getFps(self):
+    #     elapsed = perf_counter() - self.prevTime
+    #     if self.frame_loader.mode == 'webcam':
+    #         fps = 1/elapsed
+    #     else:
+    #         delay = max(0, self.frame_loader.delay_limit - elapsed)
+    #         sleep(delay)
+    #         print(f'delay : {delay:.5f}')
+    #         if delay == 0:
+    #             fps = 1/elapsed
+    #         else:
+    #             fps = self.frame_loader.video_fps
+    #     self.prevTime = perf_counter()
 
-        return fps
+    #     return fps
 
 
     def convert_qimage(self, frame):
@@ -476,174 +526,7 @@ class AiThread(QThread):
         
         return q_image.copy()
     
-    def visualize_bbox(self, img, bboxes):
-        palette = [(255, 0, 0), (0, 255, 0), (0, 0, 255),
-                   (255, 153, 0), (0, 153, 255), (153, 255, 0), (0, 255, 153),
-                   (153, 153, 153),(255, 255, 255)]
-
-        bbox_len = bboxes.shape[0]
-        palette_len = len(palette)
-        cidx = 0
-
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        # font = cv2.FONT_HERSHEY_TRIPLEX
-        font_scale = 0.8
-        thickness = 2
-
-        for bidx in range(bbox_len):
-            x_min = int(bboxes[bidx][0])
-            y_min = int(bboxes[bidx][1])
-            x_max = int(bboxes[bidx][2])
-            y_max = int(bboxes[bidx][3])
-
-            if bboxes.shape[-1] == 4:
-                img =  cv2.rectangle(img.copy(), (x_min, y_min), (x_max, y_max),
-                                     (0, 255, 0), 3)
-            else:
-                try:
-                    id = int(bboxes[bidx][4])
-                    cidx = (id-1) % palette_len
-
-                    img = self.draw_transparency_rect(img, x_min, y_min, x_max, y_max, palette[cidx],
-                                                      -1, self.bbox_alpha)
-
-                    # img =  cv2.rectangle(img.copy(), (x_min, y_min), (x_max, y_max), palette[cidx], 3)
-                    img = self.draw_transparency_rect(img, x_min, y_min, x_max, y_max, palette[cidx],
-                                                      3, self.line_alpha)
-
-                    img = self.draw_transparency_rect(img,
-                                                      x_min+3, y_min+3,
-                                                      x_min+70, y_min+30,
-                                                      (0,0,0), -1, self.alpha)
-                    
-                    img = self.draw_transparency_text(img, 'ID: {0}'.format(id), (x_min+5, y_min + 25), font,
-                                                      font_scale, palette[cidx], thickness, self.text_alpha)
-                except:
-                    self.parent.log(f'[Thread][AI][Visualization][Error] Fail to draw multi-person bbox')
-                    self.parent.log('[ERROR][AI] Fail : {0}'.format(traceback.format_exc()))
-
-        return img
     
-    
-    def visualize_pose(self, frame, keypoints, scores, thr=0.5):
-        palette = [(255, 128, 0), (255, 153, 51), (255, 178, 102), (230, 230, 0),
-                (255, 153, 255), (153, 204, 255), (255, 102, 255),
-                (255, 51, 255), (102, 178, 255),
-                (51, 153, 255), (255, 153, 153), (255, 102, 102), (255, 51, 51),
-                (153, 255, 153), (102, 255, 102), (51, 255, 51), (0, 255, 0),
-                (0, 0, 255), (255, 0, 0), (255, 255, 255),]
-        
-        skeleton = [(15, 13), (13, 11), (16, 14), (14, 12), (11, 12), (5, 11),
-                    (6, 12), (5, 6), (5, 7), (6, 8), (7, 9), (8, 10), (1, 2),
-                    (0, 1), (0, 2), (1, 3), (2, 4), (3, 5), (4, 6)]
-        link_color = [
-            0, 0, 0, 0, 7, 7,
-            7, 9, 9, 9, 9, 9, 16, 
-            16, 16, 16, 16, 16, 16
-        ]
-        point_color = [16, 16, 16, 16, 16, 9, 9, 9, 9, 9, 9, 0, 0, 0, 0, 0, 0]
-        
-        # ------------------------------------------------------------------------------------
-        # for whole body
-        hand_skeleton = [(9, 91), (91, 95), (91,99), (91, 103), (91, 107), (91, 111),
-                         (10, 112), (112, 116), (112, 120), (112, 124), (112, 128), (112, 132)]
-        skeleton = skeleton + hand_skeleton
-
-        hand_link_color = [0, 0, 4, 4, 4, 4,
-                           16, 16, 12, 12, 12, 12]
-        link_color = link_color + hand_link_color
-
-        while(len(point_color) != 133):
-            point_color.append(1)
-
-        hand_idx = [91, 95, 99, 103, 107, 111,
-                    112, 116, 120, 124, 128, 132]
-        for i in hand_idx:
-            point_color[i] = 9
-        # ------------------------------------------------------------------------------------
-        
-
-        scale = 1
-        keypoints = (keypoints * scale).astype(int)
-
-        img = cv2.resize(frame, (0, 0), fx=scale, fy=scale)
-        
-        overlay = img.copy()
-        # print(keypoints.shape)
-        # print(scores.shape)
-        for kpts, score in zip(keypoints, scores):
-            show = [0] * len(kpts)
-            for (u, v), color in zip(skeleton, link_color):
-                if score[u] > thr and score[v] > thr:
-                    cv2.line(overlay, kpts[u], tuple(kpts[v]), palette[color], self.line_width,
-                            cv2.LINE_AA)
-                    show[u] = show[v] = 1
-            for kpt, show, color in zip(kpts, show, point_color):
-                if show:
-                    cv2.circle(overlay, kpt, self.circle_radius, palette[color], -1, cv2.LINE_AA)
-                    cv2.circle(overlay, kpt, self.circle_radius, (30,30,30), 1, cv2.LINE_AA)
-
-        return cv2.addWeighted(overlay, self.skeleton_alpha, img, 1 - self.skeleton_alpha, 0)
-    
-    def visualize_action(self, img, bbox, labels):
-        if len(labels) == 0:
-            return img
-        
-        palette = [(255, 255, 255),
-                   self.convert_hex_to_rgb('#249E94'),
-                   self.convert_hex_to_rgb('#ACBAC4')]
-        font_palette = (0,0,0)
-        # font_palette = (255,255,255)
-        bbox_len = len(bbox)
-
-        # font = cv2.FONT_HERSHEY_SIMPLEX
-        font = cv2.FONT_HERSHEY_DUPLEX
-        # font = cv2.FONT_HERSHEY_TRIPLEX
-        # font = cv2.FONT_HERSHEY_TRIPLEX|cv2.FONT_ITALIC
-        font_scale = 0.6
-        thickness = 1
-
-        padding = 3
-        up_to_bbox_padding = 3
-        bboxes_gap = 2
-
-        if bbox_len > 4:
-            try:
-                x_min = int(bbox[0]) 
-                y_min = int(bbox[1])
-                cur_y = y_min - up_to_bbox_padding
-
-                for i in range(len(labels)):
-                    text = f'[{labels[i]["conf"]:.2f}] {labels[i]["label"]}'
-
-                    (tw, th), baseline = cv2.getTextSize(text, font, font_scale, thickness)
-
-                    box_h = th + baseline + padding * 2
-                    box_w = tw + padding * 2
-
-                    x1 = x_min
-                    y2 = cur_y
-                    y1 = y2 - box_h
-
-                    x2 = x1 + box_w
-
-                    img = self.draw_transparency_rect(img,
-                                                    x1, y1,
-                                                    x2, y2,
-                                                    palette[i], -1, self.alpha)
-                    text_x = x1 + padding
-                    text_y = y2 - baseline # - padding
-                    
-                    img = self.draw_transparency_text(img, text, (text_x, text_y),
-                                                      font, font_scale, font_palette, thickness, self.text_alpha)
-                    
-                    cur_y = y1 - bboxes_gap
-                    
-            except:
-                self.parent.log(f'[Thread][AI][Visualization][Error] Fail to draw multi-person bbox')
-                self.parent.log('[ERROR][AI] Fail : {0}'.format(traceback.format_exc()))
-
-        return img
     
     def draw_transparency_rect(self, img, x_min, y_min, x_max, y_max, c, type, alpha):
         overlay = img.copy()

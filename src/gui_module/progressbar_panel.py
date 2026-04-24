@@ -1,13 +1,15 @@
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QProgressBar 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 
 class ProgressbarPanel(QWidget):
+    timer_finished = Signal()
     def __init__(self, parent=None):
         super().__init__(parent)
-        
+        self.parent = parent
+
         # 1. 레이아웃 설정
         # self.layout = QVBoxLayout(self)
-        self.setFixedSize(385, 400)
+        self.setFixedSize(385, 200)
         self.max_count = 3
         self.current_count = self.max_count
         self.current_color = "whited" # 초기 색상 (예시)
@@ -42,12 +44,12 @@ class ProgressbarPanel(QWidget):
         # 5. 프로그레스 바
         self.progress = QProgressBar(self)
         self.progress.setRange(0, 1000)
-        self.progress.setValue(99) # 초기값 (예시)
+        self.progress.setValue(0) # 초기값 (예시)
         self.progress.setTextVisible(False) # 숫자 제거
         self.progress.setStyleSheet("""
             QProgressBar { 
-                background-color: #333333;
-                border: 1px solid #333333;
+                background-color: #28323F;
+                border: 1px solid #28323F;
                 border-radius: 5px; 
             }
             QProgressBar::chunk {
@@ -87,8 +89,8 @@ class ProgressbarPanel(QWidget):
     def update_progress_style(self, color):
         self.progress.setStyleSheet(f"""
             QProgressBar {{ 
-                background-color: #333333;
-                border: 1px solid #333333;
+                background-color: #28323F;
+                border: 1px solid #28323F;
                 border-radius: 5px; 
             }}
             QProgressBar::chunk {{
@@ -133,3 +135,14 @@ class ProgressbarPanel(QWidget):
             self.progress.setValue(val)
         else:
             self.gauge_timer.stop()
+            self.timer_finished.emit() # 타이머 종료 시그널 발사
+            print('Go to next stage!')
+            
+    def reset_ui(self):
+        """모든 타이머를 멈추고 프로그레스바를 0으로 초기화"""
+        self.count_timer.stop()
+        self.gauge_timer.stop()
+        self.progress.setValue(0)
+        self.lbl_timer.setText("3") # 혹은 원하는 기본값
+        self.lbl_progress.setText("SESSION READY") # 초기 안내 문구
+

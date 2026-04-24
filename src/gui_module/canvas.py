@@ -11,12 +11,14 @@ from PySide6.QtCore import Qt, QRect, QPoint
 from PySide6.QtGui import QPainter, QColor, QPolygon, QImage
 
 class Canvas(QWidget):
-    def __init__(self):
+    def __init__(self, parent=None):
         super().__init__()
+        self.parent = parent
         self.current_image = None
         self.setAttribute(Qt.WA_OpaquePaintEvent)
         
-        self.roi_points = [(1,1),(1,480),(639, 480),(639, 1)]
+        # self.roi_points = [(1,1),(1,480),(639, 480),(639, 1)]
+        self.roi_points = [(1,1),(1,719),(1279, 719),(1279, 1)]
         self.roi_polygon = None
         self.admin_mode = False
         self.canvas_timer = Duration('canvas')
@@ -32,11 +34,13 @@ class Canvas(QWidget):
         
         # action recognition
         self.ACTION_LABEL_MAP = {}
-        label_map_path = 'model/action/label_map_hsd_S001.txt'
+        # label_map_path = 'model/action/label_map_hsd_S001.txt'
+        label_map_path = 'model/action/label_map_hsd_S007.txt'
         # label_map_path = 'model/action/label_map_industry_safety3.txt'
         try:
             labels = [x.strip() for x in open(label_map_path).readlines()]
             self.ACTION_LABEL_MAP = {i: label for i, label in enumerate(labels)}
+            print(f"[Canvas] Action Label Map loaded: {self.ACTION_LABEL_MAP}")
         except:
             self.ACTION_LABEL_MAP = {
                 0 : 'Etc',
@@ -60,16 +64,39 @@ class Canvas(QWidget):
         except:
             self.font_kr = None
             print("[Canvas] 한글 폰트 로드 실패 — 영문 폴백")
+            
+        self.img_acc_panel = cv2.imread('res/UI_File/accuracy_bg.png', cv2.IMREAD_UNCHANGED)
         
         # self.scale_x = 1
         # self.scale_y = 1
                         
         # # scale & offset
-        # self.scale = 1
-        # self.offset_x = 0
-        # self.offset_y = 0
+        self.scale = 1
+        self.offset_x = 0
+        self.offset_y = 0
         
         # self.painter = QPainter(self)
+    
+    def map_to_canvas(self, x, y):
+        
+        nx = int((x - self.offset_x) * self.scale)
+        ny = int((y - self.offset_y) * self.scale)
+        return nx, ny    
+    
+    def overlay_png(self, background, overlay, x, y):
+        """NumPy를 이용한 고속 투명 PNG 합성"""
+        h, w = overlay.shape[:2]
+        if x + w > background.shape[1] or y + h > background.shape[0]:
+            return background
+
+        # 알파 채널 분리
+        overlay_img = overlay[:, :, :3]
+        overlay_img = overlay_img[:,:,::-1]
+        mask = overlay[:, :, 3:] / 255.0
+
+        # 합성
+        background[y:y+h, x:x+w] = (1.0 - mask) * background[y:y+h, x:x+w] + mask * overlay_img
+        return background
     
     # def update_frame(self, q_image, countdown=None):
     def update_frame(self, result_dict, countdown=None):
@@ -79,17 +106,45 @@ class Canvas(QWidget):
         action_results = result_dict.get("action_results", [])
         keypoints = result_dict.get("keypoints_scores_pair", np.empty((0, 133, 2)))
         current_view_mode = result_dict.get("current_view_mode", "")
-        
+
         # action 시각화를 위해 테스트중
         action_num = 0
-        if len(current_view_mode) == 7:
-            action_num = current_view_mode[-1]
-        
+        # if len(current_view_mode) == 7:
+        #     action_num = current_view_mode[-1]
+        action_num = self.parent.action_flag
         if rgb_img is None:
             print('[Error][Canvas] rgb_img is None')
+            self.update()
+
             return
-        
         img = rgb_img.copy()
+        
+        # frame size
+        h, w = img.shape[:2]
+        cw, ch = self.width(), self.height()
+        # print(f'[Debug][Canvas] img shape : {w, h}]')
+        # print(f'[Debug][Canvas] canvas size : {cw, ch}]')
+        # 캔버스 비율과 프레임 비율 계산
+        canvas_ratio = cw / ch
+        frame_ratio = w / h
+
+        if frame_ratio > canvas_ratio:
+            # 가로가 더 김 -> 가로를 자름
+            target_w = int(h * canvas_ratio)
+            self.offset_x = (w - target_w) // 2
+            self.offset_y = 0
+            cropped = img[:, self.offset_x : self.offset_x + target_w]
+        else:
+            # 세로가 더 김 -> 세로를 자름
+            target_h = int(w / canvas_ratio)
+            self.offset_x = 0
+            self.offset_y = (h - target_h) // 2
+            cropped = img[self.offset_y : self.offset_y + target_h, :]
+
+        # 캔버스 크기로 리사이즈 및 현재 배율 저장
+        img = cv2.resize(cropped, (cw, ch), interpolation=cv2.INTER_LINEAR)
+        self.scale = cw / cropped.shape[1] # 크롭된 너비 대비 캔버스 너비 비율
+        
         
         # 시각화 레이어 순서대로
         if self.show_bbox and detections.shape[0] > 0:
@@ -97,7 +152,10 @@ class Canvas(QWidget):
             
         if self.show_pose and keypoints is not None:
             kpts, scores = keypoints
-            img = self.visualize_pose(img, kpts, scores)
+            # print(f'[Debug][Canvas] keypoints : {len(kpts)}')
+            if len(kpts) > 0:
+                img = self.visualize_pose(img, kpts, scores)
+                img = self.visualize_posture_line(img, kpts, scores)
         
         # 기존 action 시각화            
         # if self.show_action and action_results:
@@ -117,8 +175,9 @@ class Canvas(QWidget):
             img = self.visualize_action_overlay(img, action_results, roi_user_id, action_num)
             # img = self.visualize_action_overlay(img, action_results, active_user_id)
         
-        img = self.draw_fps(img)
         
+        
+        """
         # numpy => QImage 변환
         self.current_image = self._to_qimage(img)
         
@@ -137,7 +196,14 @@ class Canvas(QWidget):
         self.scale = min(self.frame_width/self.q_image_frame_width, self.frame_height/self.q_image_frame_height)
         self.offset_x = (self.frame_width - (self.q_image_frame_width * self.scale))/2
         self.offset_y = (self.frame_height - (self.q_image_frame_height * self.scale))/2
+        """
+
         
+        img = self.draw_fps(img)
+        
+        self.current_image = self._to_qimage(img)
+        # ROI는 이미 보정된 캔버스 좌표계에서 그립니다.
+        self.current_image = self.paintRoi(self.current_image, self.roi_points)
         
         self.update()
         """
@@ -206,29 +272,35 @@ class Canvas(QWidget):
             mx = event.pos().x()
             my = event.pos().y()
             
-            # 영상 영역 안에서만 클릭 허용
-            if (
-                mx < self.offset_x
-                or mx > self.offset_x + self.frame_width * self.scale
-                or my < self.offset_y
-                or my > self.offset_y + self.frame_height * self.scale
-            ):
-                return
+            # # 영상 영역 안에서만 클릭 허용
+            # if (
+            #     mx < self.offset_x
+            #     or mx > self.offset_x + self.frame_width * self.scale
+            #     or my < self.offset_y
+            #     or my > self.offset_y + self.frame_height * self.scale
+            # ):
+            #     return
             
 
-            # canvas -> frame 변환
-            frame_x = (mx - self.offset_x) / self.scale
-            frame_y = (my - self.offset_y) / self.scale
-
+            # # canvas -> frame 변환
+            # frame_x = (mx - self.offset_x) / self.scale
+            # frame_y = (my - self.offset_y) / self.scale
+            
+            # 캔버스 좌표 -> 원본 프레임 좌표 역변환
+            frame_x = int(mx / self.scale + self.offset_x)
+            frame_y = int(my / self.scale + self.offset_y)
+            
             self.roi_points.append((frame_x, frame_y))
             
             print(f"Added ROI point: ({frame_x}, {frame_y})")
+            self.parent.ai_thread.roi_points = self.roi_points
+            print(f'[Debug][Canvas] Sent ROI points to AI thread: {self.roi_points}')
             self.update()
         else:
             print(f"Current points: {self.roi_points}")
     
     def paintRoi(self, image, roi_points):
-        
+        """
         painter = QPainter(image)
         painter.setPen(QColor(255, 195, 0))
         if len(roi_points) > 0:
@@ -245,7 +317,28 @@ class Canvas(QWidget):
         painter.end()
             
         return image
-    
+        """
+        painter = QPainter(image)
+        painter.setRenderHint(QPainter.Antialiasing) 
+        painter.setPen(QColor(255, 195, 0))
+        
+        # 원본 좌표 리스트를 캔버스용 좌표 리스트로 변환
+        display_points = []
+        for x, y in roi_points:
+            nx, ny = self.map_to_canvas(x, y)
+            display_points.append(QPoint(nx, ny))
+
+        if len(display_points) >= 3:
+            self.roi_polygon = QPolygon(display_points)
+            painter.drawPolygon(self.roi_polygon)
+
+        for pt in display_points:
+            # painter.drawEllipse(pt.x() - 4, pt.y() - 4, 8, 8)
+            painter.drawEllipse(pt, 5, 5)
+        
+        painter.end()
+        return image
+        
     def countdown_draw(self, q_image, countdown):
         painter = QPainter(q_image)
 
@@ -315,10 +408,11 @@ class Canvas(QWidget):
     #     self.painter.fillRect(self.rect(), QColor("#2C303C"))
     
     def draw_fps(self, img):
-        org = (5, 25)
+        # org = (5, 25)
+        org = (20, 40)
         # font = cv2.FONT_HERSHEY_SIMPLEX
         font = cv2.FONT_HERSHEY_TRIPLEX
-        scale = 0.8
+        scale = 1
         c = (0,255,0)
         w = 1
         now = time.time()
@@ -344,10 +438,16 @@ class Canvas(QWidget):
         thickness = 2
 
         for bidx in range(bbox_len):
-            x_min = int(bboxes[bidx][0])
-            y_min = int(bboxes[bidx][1])
-            x_max = int(bboxes[bidx][2])
-            y_max = int(bboxes[bidx][3])
+            # x_min = int(bboxes[bidx][0])
+            # y_min = int(bboxes[bidx][1])
+            # x_max = int(bboxes[bidx][2])
+            # y_max = int(bboxes[bidx][3])
+            # x_min = int((bboxes[bidx][0] - self.offset_x) * self.scale)
+            # y_min = int((bboxes[bidx][1] - self.offset_y) * self.scale)
+            # x_max = int((bboxes[bidx][2] - self.offset_x) * self.scale)
+            # y_max = int((bboxes[bidx][3] - self.offset_y) * self.scale)
+            x_min, y_min = self.map_to_canvas(bboxes[bidx][0], bboxes[bidx][1])
+            x_max, y_max = self.map_to_canvas(bboxes[bidx][2], bboxes[bidx][3])
 
             if bboxes.shape[-1] == 4:
                 img =  cv2.rectangle(img.copy(), (x_min, y_min), (x_max, y_max),
@@ -372,13 +472,13 @@ class Canvas(QWidget):
                     img = self.draw_transparency_text(img, 'ID: {0}'.format(id), (x_min+5, y_min + 25), font,
                                                       font_scale, palette[cidx], thickness, self.text_alpha)
                 except:
-                    self.parent.log(f'[Thread][AI][Visualization][Error] Fail to draw multi-person bbox')
-                    self.parent.log('[ERROR][AI] Fail : {0}'.format(traceback.format_exc()))
+                    print(f'[Thread][AI][Visualization][Error] Fail to draw multi-person bbox')
+                    print('[ERROR][AI] Fail : {0}'.format(traceback.format_exc()))
 
         return img
     
     
-    def visualize_pose(self, frame, keypoints, scores, thr=0.5):
+    def visualize_pose(self, img, kpts, scores, thr=0.5):
         palette = [(255, 128, 0), (255, 153, 51), (255, 178, 102), (230, 230, 0),
                 (255, 153, 255), (153, 204, 255), (255, 102, 255),
                 (255, 51, 255), (102, 178, 255),
@@ -416,10 +516,14 @@ class Canvas(QWidget):
         # ------------------------------------------------------------------------------------
         
 
-        scale = 1
-        keypoints = (keypoints * scale).astype(int)
+        # scale = 1
+        # keypoints = (keypoints * scale).astype(int)
+        keypoints = kpts.copy()
+        keypoints[:, :, 0] = (keypoints[:, :, 0] - self.offset_x) * self.scale
+        keypoints[:, :, 1] = (keypoints[:, :, 1] - self.offset_y) * self.scale
+        keypoints = keypoints.astype(int)
 
-        img = cv2.resize(frame, (0, 0), fx=scale, fy=scale)
+        # img = cv2.resize(frame, (0, 0), fx=scale, fy=scale)
         
         overlay = img.copy()
         # print(keypoints.shape)
@@ -437,6 +541,92 @@ class Canvas(QWidget):
                     cv2.circle(overlay, kpt, self.circle_radius, (30,30,30), 1, cv2.LINE_AA)
 
         return cv2.addWeighted(overlay, self.skeleton_alpha, img, 1 - self.skeleton_alpha, 0)
+    
+    def visualize_posture_line(self, img, keypoints, scores, thr=0.5):
+        """
+        몸통 기준선 + 수직 기준선 + 기울기 각도 시각화
+        - 어깨 중심(5,6) <-> 엉덩이 중심(11,12) 직선
+        - 어깨 중심에서 수직 하향 기준선
+        - 두 선 사이의 각도(°) 텍스트 표시
+        """
+        if keypoints is None or scores is None:
+            return img
+
+        overlay = img.copy()
+
+        for kpts, score in zip(keypoints, scores):
+            # 신뢰도 체크: 4개 키포인트 모두 thr 이상일 때만
+            idxs = [5, 6, 11, 12]
+            if not all(score[i] > thr for i in idxs):
+                continue
+            
+            # s_mid_raw = (kpts[5] + kpts[6]) / 2
+            # h_mid_raw = (kpts[11] + kpts[12]) / 2
+            # shoulder_mid = self.map_to_canvas(s_mid_raw[0], s_mid_raw[1])
+            # hip_mid = self.map_to_canvas(h_mid_raw[0], h_mid_raw[1])
+
+            # # 중심점 계산
+            shoulder_mid = ((kpts[5] + kpts[6]) / 2).astype(int)
+            hip_mid      = ((kpts[11] + kpts[12]) / 2).astype(int)
+            shoulder_mid = self.map_to_canvas(shoulder_mid[0], shoulder_mid[1])
+            hip_mid = self.map_to_canvas(hip_mid[0], hip_mid[1])
+
+
+            # 각도 계산
+            shoulder_mid_arr = np.array(shoulder_mid)
+            hip_mid_arr = np.array(hip_mid)
+            trunk_vec = hip_mid_arr - shoulder_mid_arr  # 어깨 -> 엉덩이
+            norm = np.linalg.norm(trunk_vec)
+            if norm < 1e-6:
+                continue
+
+            trunk_vec_norm = trunk_vec / norm
+            # (0,1)과의 내적 = trunk_vec_norm[1] (y성분만 남음)
+            cos_angle = np.clip(trunk_vec_norm[1], -1.0, 1.0)
+            angle_deg = np.degrees(np.arccos(cos_angle))
+
+            # 수직 기준선 끝점: 어깨 중심에서 hip_mid까지의 거리만큼 아래로
+            # line_len = int(norm)
+            # vertical_end = (shoulder_mid[0], shoulder_mid[1] + line_len)
+            # 오른발 기준으로 line_len 고쳐봄
+            # vertical_end = (shoulder_mid[0], kpts[16][1].astype(int))  # 오른발(16) y좌표 기준으로 수직선 길이 조정
+            _, foot_y_fixed = self.map_to_canvas(0, kpts[16][1])
+            vertical_end = (shoulder_mid[0], int(foot_y_fixed))
+
+            # ── 몸통 기준선 (초록) ──────────────────────────────
+            cv2.line(overlay,
+                    tuple(shoulder_mid), tuple(hip_mid),
+                    (0, 255, 120), 2, cv2.LINE_AA)
+
+            # ── 수직 기준선 (하늘색, 점선 느낌으로 두께 얇게) ──
+            cv2.line(overlay,
+                    tuple(shoulder_mid), vertical_end,
+                    (100, 200, 255), 2, cv2.LINE_AA)
+
+            # ── 중심점 마커 ─────────────────────────────────────
+            cv2.circle(overlay, tuple(shoulder_mid), 5, (0, 255, 120), -1, cv2.LINE_AA)
+            cv2.circle(overlay, tuple(hip_mid),      5, (0, 255, 120), -1, cv2.LINE_AA)
+
+            # ── 각도 호(arc) - 사잇각 강조 ──────────────────────
+            arc_radius = 35
+            # 호의 시작/끝 각도: OpenCV는 3시 방향이 0°, 시계방향
+            # 수직선은 90°, 몸통 벡터 방향을 atan2로 계산
+            trunk_angle_cv = np.degrees(np.arctan2(trunk_vec[1], trunk_vec[0]))
+            cv2.ellipse(overlay,
+                        tuple(shoulder_mid),
+                        (arc_radius, arc_radius),
+                        0,
+                        90,                      # 수직선 방향
+                        trunk_angle_cv,          # 몸통 벡터 방향
+                        (255, 220, 50), 2, cv2.LINE_AA)
+
+            # ── 각도 텍스트 ──────────────────────────────────────
+            text = f'{angle_deg:.1f} deg'
+            text_pos = (shoulder_mid[0] + arc_radius + 5, shoulder_mid[1] + 20)
+            cv2.putText(overlay, text, text_pos,
+                        cv2.FONT_HERSHEY_DUPLEX, 0.6, (255, 220, 50), 1, cv2.LINE_AA)
+
+        return cv2.addWeighted(overlay, 0.85, img, 0.15, 0)
     
     def visualize_action_overlay(self, img, action_results, roi_user_id, action_num):
         """
@@ -498,7 +688,30 @@ class Canvas(QWidget):
 
         # if not labels:
         #     return img
+        
+        
+        # 시안 적용 버전
+        h, w = img.shape[:2]
+        pw, ph = self.img_acc_panel.shape[1], self.img_acc_panel.shape[0]
+        # x0, y0 = w - self.img_acc_panel.shape[1] - 20, 20
+        x0, y0 = w - pw - 25, 25
+        
+        img = self.overlay_png(img, self.img_acc_panel, x0, y0)
 
+        # 4. 점수 텍스트 표출 (배경 위에 얹기)
+        # 위치(x0 + N, y0 + N)는 이미지 내 'Accuracy' 글자 옆 빈 공간에 맞춰보세요.
+        conf_percent = f"{int(conf * 100)}"
+        
+        # 숫자 출력 (큰 폰트)
+        cv2.putText(img, conf_percent, (x0 + 120, y0 + 65), 
+                    cv2.FONT_HERSHEY_DUPLEX, 1.2, text_color, 2, cv2.LINE_AA)
+        
+        # % 표시 (작은 폰트)
+        cv2.putText(img, "%", (x0 + 195, y0 + 65), 
+                    cv2.FONT_HERSHEY_DUPLEX, 0.6, text_color, 1, cv2.LINE_AA)
+
+        
+        """
         img = img.copy()
         h, w = img.shape[:2]
 
@@ -574,7 +787,7 @@ class Canvas(QWidget):
         cv2.rectangle(overlay_2, (x0, y0), (x0 + box_w, y0 + panel_h), (0, 180, 120), 1)
         alpha = 0.3
         cv2.addWeighted(overlay_2, alpha, img, 1 - alpha, 0, img)
-        
+        """
         return img
     
     def visualize_action(self, img, bbox, labels):
@@ -632,8 +845,8 @@ class Canvas(QWidget):
                     cur_y = y1 - bboxes_gap
                     
             except:
-                self.parent.log(f'[Thread][AI][Visualization][Error] Fail to draw multi-person bbox')
-                self.parent.log('[ERROR][AI] Fail : {0}'.format(traceback.format_exc()))
+                print(f'[Thread][AI][Visualization][Error] Fail to draw multi-person bbox')
+                print('[ERROR][AI] Fail : {0}'.format(traceback.format_exc()))
 
         return img
     
